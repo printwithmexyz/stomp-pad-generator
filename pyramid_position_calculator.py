@@ -16,11 +16,22 @@ from scipy.spatial import distance
 from skimage.morphology import medial_axis, skeletonize
 
 
-def parse_svg_to_polygon(svg_file, target_width=100, samples_per_segment=20):
+def parse_svg_to_polygon(svg_file, target_width=100, target_height=None, samples_per_segment=20):
     """
     Parse SVG file and convert to Shapely polygon
-    Returns (polygon, svg_viewbox_info) where polygon is scaled to target_width
+    Returns (polygon, svg_viewbox_info) where polygon is scaled to fit within target dimensions
     Properly samples curves and ensures closed paths
+
+    Args:
+        svg_file: Path to SVG file
+        target_width: Target width in mm (X dimension)
+        target_height: Target height in mm (Y dimension), or None to scale by width only
+        samples_per_segment: Number of sample points per curve segment
+
+    Scaling behavior:
+        - If only target_width is specified: scale to match width (maintain aspect ratio)
+        - If both target_width and target_height are specified: scale to fit within both
+          constraints, using the smaller scale factor to maintain aspect ratio
     """
     tree = ET.parse(svg_file)
     root = tree.getroot()
@@ -97,26 +108,50 @@ def parse_svg_to_polygon(svg_file, target_width=100, samples_per_segment=20):
 
     from shapely.affinity import scale as shapely_scale
 
-    # Scale to target width while maintaining aspect ratio
+    # Calculate scale factor based on target dimensions
     # IMPORTANT: Scale from origin (0,0) to match OpenSCAD's resize() behavior
     # OpenSCAD resize() scales the SVG but keeps it in its original coordinate space
     # We do NOT translate to origin - we keep the SVG viewBox coordinates
-    scale_factor = target_width / original_width
+
+    scale_factor_width = target_width / original_width
+
+    if target_height is not None and target_height > 0:
+        # Both width and height constraints specified
+        # Use the smaller scale factor to fit within both constraints
+        scale_factor_height = target_height / original_height
+        scale_factor = min(scale_factor_width, scale_factor_height)
+        scaling_mode = "fit-to-bounds"
+        if scale_factor == scale_factor_width:
+            limiting_dim = "width"
+        else:
+            limiting_dim = "height"
+    else:
+        # Only width constraint - scale to match width
+        scale_factor = scale_factor_width
+        scaling_mode = "fit-to-width"
+        limiting_dim = "width"
+
     poly_scaled = shapely_scale(poly, xfact=scale_factor, yfact=scale_factor, origin=(0, 0))
 
     bounds_scaled = poly_scaled.bounds
+    final_width = bounds_scaled[2] - bounds_scaled[0]
+    final_height = bounds_scaled[3] - bounds_scaled[1]
 
     print(f"  SVG parsed: {len(all_points)} points sampled")
     print(f"  Original size: {original_width:.1f} x {original_height:.1f}")
+    print(f"  Scaling mode: {scaling_mode} (limited by {limiting_dim})")
+    print(f"  Scale factor: {scale_factor:.4f}")
     print(
         f"  Scaled bounds: ({bounds_scaled[0]:.1f}, {bounds_scaled[1]:.1f}) to ({bounds_scaled[2]:.1f}, {bounds_scaled[3]:.1f})")
-    print(f"  Scaled size: {bounds_scaled[2] - bounds_scaled[0]:.1f} x {bounds_scaled[3] - bounds_scaled[1]:.1f}")
+    print(f"  Final size: {final_width:.1f} x {final_height:.1f}")
 
     # Return polygon and SVG viewBox info (scaled)
     svg_info = {
-        'viewbox_width': svg_width * scale_factor if svg_width else bounds_scaled[2] - bounds_scaled[0],
-        'viewbox_height': svg_height * scale_factor if svg_height else bounds_scaled[3] - bounds_scaled[1],
-        'scale_factor': scale_factor
+        'viewbox_width': svg_width * scale_factor if svg_width else final_width,
+        'viewbox_height': svg_height * scale_factor if svg_height else final_height,
+        'scale_factor': scale_factor,
+        'final_width': final_width,
+        'final_height': final_height
     }
 
     return poly_scaled, svg_info
@@ -342,8 +377,9 @@ def generate_openscad_with_positions(
 
 // ===== PARAMETERS =====
 svg_file = "{svg_file}";
-target_width = {params.get('target_width', 100)};
-maintain_aspect_ratio = true;
+// Final dimensions after scaling (calculated by Python)
+final_width = {svg_info.get('final_width', params.get('target_width', 100)) if svg_info else params.get('target_width', 100)};
+final_height = {svg_info.get('final_height', 0) if svg_info else 0};
 
 base_thickness = {params.get('base_thickness', 2)};
 outline_offset = {params.get('outline_offset', 2)};
@@ -380,7 +416,8 @@ valid_pyramid_positions = [
 module scaled_svg() {
     // Note: OpenSCAD import() automatically handles SVG coordinate system
     // The imported SVG will match the OpenSCAD coordinate system
-    resize([target_width, 0, 0], auto=maintain_aspect_ratio) {
+    // Use resize with both dimensions if height is specified, otherwise auto-scale
+    resize([final_width, final_height > 0 ? final_height : 0, 0], auto=true) {
         import(svg_file);
     }
 }
@@ -523,6 +560,7 @@ def main():
 
     # SVG processing parameters
     TARGET_WIDTH = 152
+    TARGET_HEIGHT = None  # Set to a value (e.g., 100) to constrain height, or None for width-only scaling
     SAMPLES_PER_SEGMENT = 40
     SKELETON_RESOLUTION = 0.4
 
@@ -543,6 +581,7 @@ def main():
     # Parse SVG to polygon
     print(f"Parsing {SVG_FILE}...")
     polygon, svg_info = parse_svg_to_polygon(SVG_FILE, target_width=TARGET_WIDTH,
+                                             target_height=TARGET_HEIGHT,
                                              samples_per_segment=SAMPLES_PER_SEGMENT)
 
     if polygon is None:
