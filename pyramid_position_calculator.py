@@ -517,9 +517,9 @@ def main():
     """
     # ===== CONFIGURATION CONSTANTS =====
     # Input/Output files
-    SVG_FILE = "Snake7-01.svg"
-    OUTPUT_FILE = "stomp_pad_precalculated2.scad"
-    DEBUG_VIZ_FILE = "debug_viz2.png"
+    SVG_FILE = "-01.svg"
+    OUTPUT_FILE = "stomp_pad_precalculated.scad"
+    DEBUG_VIZ_FILE = "debug_viz.png"
 
     # SVG processing parameters
     TARGET_WIDTH = 152
