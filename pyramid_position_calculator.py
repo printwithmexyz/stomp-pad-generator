@@ -16,7 +16,12 @@ from scipy.spatial import distance
 from skimage.morphology import medial_axis, skeletonize
 
 
-def parse_svg_to_polygon(svg_file, target_width=100, target_height=None, samples_per_segment=20):
+def _log(logger, message):
+    """Emit a message via the supplied logger callback, falling back to print."""
+    (logger or print)(message)
+
+
+def parse_svg_to_polygon(svg_file, target_width=100, target_height=None, samples_per_segment=20, logger=None):
     """
     Parse SVG file and convert to Shapely polygon
     Returns (polygon, svg_viewbox_info) where polygon is scaled to fit within target dimensions
@@ -87,7 +92,7 @@ def parse_svg_to_polygon(svg_file, target_width=100, target_height=None, samples
         all_points.extend(path_points)
 
     if len(all_points) < 3:
-        print(f"ERROR: Not enough points parsed from SVG ({len(all_points)} points)")
+        _log(logger, f"ERROR: Not enough points parsed from SVG ({len(all_points)} points)")
         return None
 
     # Create polygon from sampled points
@@ -97,7 +102,7 @@ def parse_svg_to_polygon(svg_file, target_width=100, target_height=None, samples
         # Try to fix invalid polygon
         poly = poly.buffer(0)
         if not poly.is_valid:
-            print("ERROR: Could not create valid polygon from SVG")
+            _log(logger, "ERROR: Could not create valid polygon from SVG")
             return None
 
     # Get original bounds
@@ -137,13 +142,13 @@ def parse_svg_to_polygon(svg_file, target_width=100, target_height=None, samples
     final_width = bounds_scaled[2] - bounds_scaled[0]
     final_height = bounds_scaled[3] - bounds_scaled[1]
 
-    print(f"  SVG parsed: {len(all_points)} points sampled")
-    print(f"  Original size: {original_width:.1f} x {original_height:.1f}")
-    print(f"  Scaling mode: {scaling_mode} (limited by {limiting_dim})")
-    print(f"  Scale factor: {scale_factor:.4f}")
-    print(
-        f"  Scaled bounds: ({bounds_scaled[0]:.1f}, {bounds_scaled[1]:.1f}) to ({bounds_scaled[2]:.1f}, {bounds_scaled[3]:.1f})")
-    print(f"  Final size: {final_width:.1f} x {final_height:.1f}")
+    _log(logger, f"  SVG parsed: {len(all_points)} points sampled")
+    _log(logger, f"  Original size: {original_width:.1f} x {original_height:.1f}")
+    _log(logger, f"  Scaling mode: {scaling_mode} (limited by {limiting_dim})")
+    _log(logger, f"  Scale factor: {scale_factor:.4f}")
+    _log(logger,
+         f"  Scaled bounds: ({bounds_scaled[0]:.1f}, {bounds_scaled[1]:.1f}) to ({bounds_scaled[2]:.1f}, {bounds_scaled[3]:.1f})")
+    _log(logger, f"  Final size: {final_width:.1f} x {final_height:.1f}")
 
     # Return polygon and SVG viewBox info (scaled)
     svg_info = {
@@ -261,7 +266,8 @@ def calculate_valid_pyramid_positions(
         pyramid_spacing=1,
         target_width=100,
         include_rotation=True,
-        safety_margin=0.5
+        safety_margin=0.5,
+        logger=None
 ):
     """
     Calculate pyramid positions using centerline/skeleton-based hexagonal packing
@@ -273,15 +279,15 @@ def calculate_valid_pyramid_positions(
         pyramid_spacing: Spacing between pyramids
         safety_margin: Inset margin from boundary edge
     """
-    print("  Calculating skeleton/centerline...")
+    _log(logger, "  Calculating skeleton/centerline...")
     # Calculate the skeleton/centerline of the shape
     skeleton_points = calculate_skeleton(polygon, resolution=0.3)
 
     if not skeleton_points:
-        print("  WARNING: No skeleton points found")
+        _log(logger, "  WARNING: No skeleton points found")
         return []
 
-    print(f"  Found {len(skeleton_points)} skeleton points")
+    _log(logger, f"  Found {len(skeleton_points)} skeleton points")
 
     # Shrink polygon by safety margin to ensure pyramids stay inside
     polygon_safe = polygon.buffer(-safety_margin) if safety_margin > 0 else polygon
@@ -301,7 +307,7 @@ def calculate_valid_pyramid_positions(
     num_rows = int(np.ceil((max_y - min_y) / hex_spacing_y)) + 2
     num_cols = int(np.ceil((max_x - min_x) / hex_spacing_x)) + 2
 
-    print(f"  Testing {num_rows * num_cols} potential positions...")
+    _log(logger, f"  Testing {num_rows * num_cols} potential positions...")
 
     for row in range(num_rows):
         # Offset every other row for hex pattern
@@ -332,7 +338,7 @@ def calculate_valid_pyramid_positions(
                 else:
                     valid_positions.append([x_pos, y_pos])
 
-    print(f"  Valid positions: {len(valid_positions)}")
+    _log(logger, f"  Valid positions: {len(valid_positions)}")
     return valid_positions
 
 
@@ -341,6 +347,7 @@ def generate_openscad_with_positions(
         valid_positions,
         output_file,
         svg_info=None,
+        logger=None,
         **params
 ):
     """
@@ -496,11 +503,11 @@ stomp_pad_complete();
     with open(output_file, 'w') as f:
         f.write(scad_code)
 
-    print(f"Generated {output_file}")
-    print(f"Valid pyramid positions: {len(valid_positions)}")
+    _log(logger, f"Generated {output_file}")
+    _log(logger, f"Valid pyramid positions: {len(valid_positions)}")
 
 
-def save_debug_visualization(polygon, skeleton_points, valid_positions, output_file="debug_viz.svg"):
+def save_debug_visualization(polygon, skeleton_points, valid_positions, output_file="debug_viz.svg", logger=None):
     """
     Save a debug SVG showing the polygon boundary, skeleton, and pyramid positions
     """
@@ -541,11 +548,11 @@ def save_debug_visualization(polygon, skeleton_points, valid_positions, output_f
         ax.set_title('Debug Visualization: Polygon, Skeleton, and Pyramids')
 
         plt.savefig(output_file, dpi=150, bbox_inches='tight')
-        print(f"  Debug visualization saved: {output_file}")
+        _log(logger, f"  Debug visualization saved: {output_file}")
         plt.close()
 
     except ImportError:
-        print("  matplotlib not available for debug visualization")
+        _log(logger, "  matplotlib not available for debug visualization")
 
 
 def main():
