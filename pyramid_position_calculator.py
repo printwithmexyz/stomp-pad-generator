@@ -507,6 +507,15 @@ stomp_pad_complete();
     _log(logger, f"Valid pyramid positions: {len(valid_positions)}")
 
 
+def _polygon_exterior_rings(geom):
+    """Yield exterior coordinate rings for Polygon or MultiPolygon."""
+    if geom.geom_type == 'Polygon':
+        yield geom.exterior.xy
+    elif geom.geom_type == 'MultiPolygon':
+        for sub in geom.geoms:
+            yield sub.exterior.xy
+
+
 def save_debug_visualization(polygon, skeleton_points, valid_positions, output_file="debug_viz.svg", logger=None):
     """
     Save a debug SVG showing the polygon boundary, skeleton, and pyramid positions
@@ -518,9 +527,12 @@ def save_debug_visualization(polygon, skeleton_points, valid_positions, output_f
 
         fig, ax = plt.subplots(figsize=(12, 10))
 
-        # Plot polygon boundary
-        x, y = polygon.exterior.xy
-        ax.plot(x, y, 'b-', linewidth=2, label='Polygon Boundary')
+        # Plot polygon boundary (handles MultiPolygon from SVGs with multiple shapes)
+        first = True
+        for x, y in _polygon_exterior_rings(polygon):
+            ax.plot(x, y, 'b-', linewidth=2,
+                    label='Polygon Boundary' if first else None)
+            first = False
 
         # Plot skeleton points
         if skeleton_points:
