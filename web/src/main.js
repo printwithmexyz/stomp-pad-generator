@@ -19,6 +19,18 @@ const paramsForm = document.getElementById('params-form');
 let pyodide = null;
 let pendingFiles = [];
 
+// three.js viewers leak WebGL contexts if their dispose() is never called.
+// Browsers cap active contexts (~16 in Chrome) — track every mounted handle
+// so we can release them on Clear and on each new Process All run.
+const active3dHandles = new Set();
+
+function disposeAll3d() {
+  for (const handle of active3dHandles) {
+    try { handle.dispose(); } catch { /* ignore */ }
+  }
+  active3dHandles.clear();
+}
+
 function log(msg) {
   const ts = new Date().toLocaleTimeString();
   consoleEl.textContent += `[${ts}] ${msg}\n`;
@@ -129,7 +141,9 @@ function addResult(file, scad, svg, stl, preview) {
   // Draw after attach so clientWidth/Height are non-zero.
   requestAnimationFrame(() => draw2dPreview(canvas2d, preview));
   if (viewer3dContainer && stl) {
-    mount3dPreview(viewer3dContainer, stl).catch((e) =>
+    mount3dPreview(viewer3dContainer, stl).then((handle) => {
+      active3dHandles.add(handle);
+    }).catch((e) =>
       log(`ERROR mounting 3D preview for ${file.name}: ${e.message || e}`)
     );
   }
@@ -166,7 +180,13 @@ async function processOne(file, params) {
   pyodide.globals.set('js_log', (msg) => log(`[${file.name}] ${msg}`));
   pyodide.globals.set('js_params', pyodide.toPy(params));
   pyodide.globals.set('js_filename', file.name);
-  pyodide.runPython(`
+
+  // Each runPythonAsync block returns control to the JS event loop on resolve,
+  // so console lines from py_logger flush and the browser can repaint between
+  // pipeline steps. Within a single step we still block (real fix is a Web
+  // Worker; this is the bandage).
+
+  await pyodide.runPythonAsync(`
 from pyramid_position_calculator import (
     parse_svg_to_polygon,
     calculate_skeleton,
@@ -185,7 +205,13 @@ polygon, svg_info = parse_svg_to_polygon(
     samples_per_segment=p['samples_per_segment'],
     logger=py_logger,
 )
+`);
+
+  await pyodide.runPythonAsync(`
 skeleton_points = calculate_skeleton(polygon, resolution=p['skeleton_resolution'])
+`);
+
+  await pyodide.runPythonAsync(`
 valid_positions = calculate_valid_pyramid_positions(
     polygon,
     pyramid_size=p['pyramid_size'],
@@ -193,8 +219,12 @@ valid_positions = calculate_valid_pyramid_positions(
     target_width=p['target_width'],
     include_rotation=p['include_rotation'],
     safety_margin=p['safety_margin'],
+    skeleton_points=skeleton_points,
     logger=py_logger,
 )
+`);
+
+  await pyodide.runPythonAsync(`
 generate_openscad_with_positions(
     js_filename,
     valid_positions,
@@ -229,8 +259,11 @@ preview_data = {
     ],
 }
 `);
+
   const scad = pyodide.FS.readFile('/output.scad', { encoding: 'utf8' });
-  const preview = pyodide.globals.get('preview_data').toJs({ dict_converter: Object.fromEntries });
+  const previewProxy = pyodide.globals.get('preview_data');
+  const preview = previewProxy.toJs({ dict_converter: Object.fromEntries });
+  previewProxy.destroy();
   preview.pyramidSize = params.pyramid_size;
   return { scad, svg: svgText, preview };
 }
@@ -250,6 +283,7 @@ fileInput.addEventListener('change', () => {
 });
 
 clearBtn.addEventListener('click', () => {
+  disposeAll3d();
   resultsEl.innerHTML = '';
   consoleEl.textContent = '';
 });

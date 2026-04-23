@@ -267,6 +267,8 @@ def calculate_valid_pyramid_positions(
         target_width=100,
         include_rotation=True,
         safety_margin=0.5,
+        skeleton_points=None,
+        skeleton_resolution=0.3,
         logger=None
 ):
     """
@@ -279,9 +281,9 @@ def calculate_valid_pyramid_positions(
         pyramid_spacing: Spacing between pyramids
         safety_margin: Inset margin from boundary edge
     """
-    _log(logger, "  Calculating skeleton/centerline...")
-    # Calculate the skeleton/centerline of the shape
-    skeleton_points = calculate_skeleton(polygon, resolution=0.3)
+    if skeleton_points is None:
+        _log(logger, "  Calculating skeleton/centerline...")
+        skeleton_points = calculate_skeleton(polygon, resolution=skeleton_resolution)
 
     if not skeleton_points:
         _log(logger, "  WARNING: No skeleton points found")

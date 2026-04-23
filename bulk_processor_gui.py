@@ -105,6 +105,7 @@ def _svg_worker(svg_file_path, output_path_str, cache_path_str, params, use_cach
                 target_width=params['target_width'],
                 include_rotation=params['include_rotation'],
                 safety_margin=params['safety_margin'],
+                skeleton_points=skeleton_points,
                 logger=log
             )
             log("Saving to cache...")
@@ -818,6 +819,7 @@ class BulkProcessorGUI:
                 target_width=self.target_width.get(),
                 include_rotation=self.include_rotation.get(),
                 safety_margin=self.safety_margin.get(),
+                skeleton_points=skeleton_points,
                 logger=self.log
             )
 
