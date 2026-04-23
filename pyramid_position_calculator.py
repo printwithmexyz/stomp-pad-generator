@@ -7,13 +7,11 @@ Generates OpenSCAD code with ONLY valid positions
 """
 
 import numpy as np
-from shapely.geometry import Point, Polygon, LineString, MultiPoint
-from shapely.ops import unary_union, voronoi_diagram
+import shapely
+from shapely.geometry import Point, Polygon
 from svg.path import parse_path
 import xml.etree.ElementTree as ET
-from pathlib import Path
-from scipy.spatial import distance
-from skimage.morphology import medial_axis, skeletonize
+from skimage.morphology import medial_axis
 
 
 def _log(logger, message):
@@ -55,41 +53,73 @@ def parse_svg_to_polygon(svg_file, target_width=100, target_height=None, samples
         svg_width = vb[2]
         svg_height = vb[3]
 
-    # Extract and properly sample all paths
+    # Extract and sample all supported shape elements. SVGs in the wild use
+    # <path> most of the time, but Figma / icon sets emit primitives directly.
+    NS = '{http://www.w3.org/2000/svg}'
     all_points = []
 
-    for path_elem in root.findall('.//{http://www.w3.org/2000/svg}path'):
+    def _close(pts):
+        if len(pts) > 2:
+            first = np.array(pts[0])
+            last = np.array(pts[-1])
+            if np.linalg.norm(first - last) > 0.1:
+                pts.append(pts[0])
+        return pts
+
+    for path_elem in root.findall(f'.//{NS}path'):
         d = path_elem.get('d')
         if not d:
             continue
-
         path = parse_path(d)
-
-        # Sample each segment of the path to capture curves
         path_points = []
         for segment in path:
-            # Sample multiple points along each segment
             for i in range(samples_per_segment):
                 t = i / samples_per_segment
                 point = segment.point(t)
                 path_points.append((point.real, point.imag))
-
-        # Add the final point of the last segment
         if path:
             final_point = path[-1].end
             path_points.append((final_point.real, final_point.imag))
+        all_points.extend(_close(path_points))
 
-        # Check if path is closed (first and last points are close)
-        if len(path_points) > 2:
-            first = np.array(path_points[0])
-            last = np.array(path_points[-1])
-            distance = np.linalg.norm(first - last)
+    for poly_elem in root.findall(f'.//{NS}polygon'):
+        pts_str = poly_elem.get('points', '').replace(',', ' ').split()
+        coords = [float(v) for v in pts_str]
+        pts = [(coords[i], coords[i + 1]) for i in range(0, len(coords) - 1, 2)]
+        if len(pts) >= 3:
+            all_points.extend(_close(pts))
 
-            # If not closed, force closure
-            if distance > 0.1:  # threshold for "close enough"
-                path_points.append(path_points[0])
+    for rect_elem in root.findall(f'.//{NS}rect'):
+        x = float(rect_elem.get('x', 0))
+        y = float(rect_elem.get('y', 0))
+        w = float(rect_elem.get('width', 0))
+        h = float(rect_elem.get('height', 0))
+        if w > 0 and h > 0:
+            all_points.extend([(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)])
 
-        all_points.extend(path_points)
+    circle_samples = max(samples_per_segment * 2, 64)
+    for circle_elem in root.findall(f'.//{NS}circle'):
+        cx = float(circle_elem.get('cx', 0))
+        cy = float(circle_elem.get('cy', 0))
+        r = float(circle_elem.get('r', 0))
+        if r > 0:
+            angles = np.linspace(0, 2 * np.pi, circle_samples, endpoint=True)
+            all_points.extend(zip(
+                (cx + r * np.cos(angles)).tolist(),
+                (cy + r * np.sin(angles)).tolist(),
+            ))
+
+    for ellipse_elem in root.findall(f'.//{NS}ellipse'):
+        cx = float(ellipse_elem.get('cx', 0))
+        cy = float(ellipse_elem.get('cy', 0))
+        rx = float(ellipse_elem.get('rx', 0))
+        ry = float(ellipse_elem.get('ry', 0))
+        if rx > 0 and ry > 0:
+            angles = np.linspace(0, 2 * np.pi, circle_samples, endpoint=True)
+            all_points.extend(zip(
+                (cx + rx * np.cos(angles)).tolist(),
+                (cy + ry * np.sin(angles)).tolist(),
+            ))
 
     if len(all_points) < 3:
         _log(logger, f"ERROR: Not enough points parsed from SVG ({len(all_points)} points)")
@@ -164,39 +194,28 @@ def parse_svg_to_polygon(svg_file, target_width=100, target_height=None, samples
 
 def calculate_skeleton(polygon, resolution=0.5):
     """
-    Calculate the centerline/skeleton of the polygon using medial axis transform
-    Returns a list of skeleton points along the centerline
-    """
-    bounds = polygon.bounds
-    min_x, min_y, max_x, max_y = bounds
+    Calculate the centerline/skeleton of the polygon using medial axis transform.
+    Returns a list of (x, y) skeleton points.
 
-    # Create a rasterized version of the polygon
+    Vectorized: shapely.contains_xy over a meshgrid is ~50-100x faster than
+    polygon.contains(Point(x, y)) per pixel, and matters a lot in Pyodide
+    where Python loops are uncached interpreted bytecode.
+    """
+    min_x, min_y, max_x, max_y = polygon.bounds
     width = int((max_x - min_x) / resolution) + 1
     height = int((max_y - min_y) / resolution) + 1
 
-    # Create binary image
-    binary_image = np.zeros((height, width), dtype=bool)
+    grid_x = min_x + np.arange(width) * resolution
+    grid_y = min_y + np.arange(height) * resolution
+    xx, yy = np.meshgrid(grid_x, grid_y)
+    binary_image = shapely.contains_xy(polygon, xx.ravel(), yy.ravel()).reshape(height, width)
 
-    for i in range(height):
-        for j in range(width):
-            x = min_x + j * resolution
-            y = min_y + i * resolution
-            if polygon.contains(Point(x, y)):
-                binary_image[i, j] = True
-
-    # Calculate medial axis (skeleton)
     skeleton = medial_axis(binary_image)
 
-    # Extract skeleton points
-    skeleton_points = []
-    for i in range(height):
-        for j in range(width):
-            if skeleton[i, j]:
-                x = min_x + j * resolution
-                y = min_y + i * resolution
-                skeleton_points.append((x, y))
-
-    return skeleton_points
+    iy, jx = np.where(skeleton)
+    xs = min_x + jx * resolution
+    ys = min_y + iy * resolution
+    return list(zip(xs.tolist(), ys.tolist()))
 
 
 def calculate_centerline_tangent(skeleton_points, x, y, sample_distance=3.0):

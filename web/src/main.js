@@ -13,11 +13,14 @@ const resultsEl = document.getElementById('results');
 const fileListEl = document.getElementById('file-list');
 const fileInput = document.getElementById('file-input');
 const processBtn = document.getElementById('process-btn');
+const stopBtn = document.getElementById('stop-btn');
 const clearBtn = document.getElementById('clear-btn');
 const paramsForm = document.getElementById('params-form');
 
 let pyodide = null;
 let pendingFiles = [];
+let stopRequested = false;
+const fileStatuses = new Map();  // filename -> 'pending' | 'working' | 'done' | 'error'
 
 // three.js viewers leak WebGL contexts if their dispose() is never called.
 // Browsers cap active contexts (~16 in Chrome) — track every mounted handle
@@ -60,10 +63,26 @@ function readParams() {
 function refreshFileList() {
   fileListEl.innerHTML = '';
   for (const f of pendingFiles) {
+    const status = fileStatuses.get(f.name) || 'pending';
     const li = document.createElement('li');
-    li.textContent = `${f.name} (${(f.size / 1024).toFixed(1)} KB)`;
+    li.dataset.status = status;
+    const name = document.createElement('span');
+    name.className = 'file-name';
+    name.textContent = f.name;
+    const meta = document.createElement('span');
+    meta.className = 'file-meta';
+    meta.textContent = `${(f.size / 1024).toFixed(1)} KB`;
+    const statusEl = document.createElement('span');
+    statusEl.className = 'file-status';
+    statusEl.textContent = status;
+    li.append(name, meta, statusEl);
     fileListEl.appendChild(li);
   }
+}
+
+function setFileStatus(filename, status) {
+  fileStatuses.set(filename, status);
+  refreshFileList();
 }
 
 function download(data, filename, mime) {
@@ -279,7 +298,14 @@ async function renderStlForFile(file, scad, svgText) {
 
 fileInput.addEventListener('change', () => {
   pendingFiles = Array.from(fileInput.files);
+  fileStatuses.clear();
   refreshFileList();
+});
+
+stopBtn.addEventListener('click', () => {
+  stopRequested = true;
+  stopBtn.disabled = true;
+  log('Stop requested — finishing current file then aborting.');
 });
 
 clearBtn.addEventListener('click', () => {
@@ -297,10 +323,18 @@ processBtn.addEventListener('click', async () => {
     log('No SVG files selected.');
     return;
   }
+  stopRequested = false;
   processBtn.disabled = true;
   processBtn.textContent = 'Processing…';
+  stopBtn.disabled = false;
+  for (const f of pendingFiles) setFileStatus(f.name, 'pending');
   const params = readParams();
   for (const file of pendingFiles) {
+    if (stopRequested) {
+      log('Stopped.');
+      break;
+    }
+    setFileStatus(file.name, 'working');
     try {
       const { scad, svg, preview } = await processOne(file, params);
       let stl = null;
@@ -312,12 +346,15 @@ processBtn.addEventListener('click', async () => {
         }
       }
       addResult(file, scad, svg, stl, preview);
+      setFileStatus(file.name, 'done');
     } catch (e) {
       log(`ERROR processing ${file.name}: ${e.message || e}`);
+      setFileStatus(file.name, 'error');
     }
   }
   processBtn.disabled = false;
   processBtn.textContent = 'Process all';
+  stopBtn.disabled = true;
   log('\nDone.');
 });
 

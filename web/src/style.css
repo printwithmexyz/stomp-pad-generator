@@ -55,9 +55,28 @@ section h2 { margin: 0 0 16px; font-size: 1.1rem; }
   font-size: 0.9rem;
 }
 .file-list li {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 12px;
+  align-items: center;
   padding: 4px 0;
   color: #555;
 }
+.file-name { font-weight: 500; }
+.file-meta { color: #999; font-size: 0.8rem; }
+.file-status {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  min-width: 60px;
+  text-align: center;
+}
+.file-list li[data-status="pending"] .file-status { background: #e5e5ea; color: #6e6e73; }
+.file-list li[data-status="working"] .file-status { background: #007aff; color: white; }
+.file-list li[data-status="done"]    .file-status { background: #34c759; color: white; }
+.file-list li[data-status="error"]   .file-status { background: #ff3b30; color: white; }
 
 form {
   display: grid;
@@ -109,7 +128,9 @@ button {
 button:hover:not(:disabled) { background: #005fcc; }
 button:disabled { background: #bbb; cursor: not-allowed; }
 #clear-btn { background: #6e6e73; }
-#clear-btn:hover { background: #555; }
+#clear-btn:hover:not(:disabled) { background: #555; }
+#stop-btn { background: #ff3b30; }
+#stop-btn:hover:not(:disabled) { background: #d32a20; }
 
 .results { display: flex; flex-direction: column; gap: 12px; }
 .result {
