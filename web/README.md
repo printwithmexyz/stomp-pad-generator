@@ -57,3 +57,9 @@ That's it. Vercel runs `npm install` (which triggers `prepare` via the
   upgrade.
 - Pyodide can't use multiprocessing, so multi-file uploads run sequentially.
   The desktop app's process pool is the way to go for bulk batches.
+
+## See also
+
+- [../README.md](../README.md) — repo front door
+- [../docs/architecture.md](../docs/architecture.md) — how the in-browser pipeline + Vite quirks fit together
+- [../docs/desktop.md](../docs/desktop.md) — desktop GUI guide
