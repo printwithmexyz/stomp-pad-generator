@@ -94,7 +94,8 @@ function download(data, filename, mime) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  // Hold the blob URL long enough for slow connections / Save-As dialogs.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 function addResult(file, scad, svg, stl, preview) {
@@ -197,7 +198,10 @@ async function processOne(file, params) {
   const svgText = await file.text();
   pyodide.FS.writeFile('/input.svg', svgText);
   pyodide.globals.set('js_log', (msg) => log(`[${file.name}] ${msg}`));
-  pyodide.globals.set('js_params', pyodide.toPy(params));
+  // toPy returns a PyProxy we own — hold the reference so we can destroy it
+  // explicitly after the run instead of relying on Pyodide's GC.
+  const paramsProxy = pyodide.toPy(params);
+  pyodide.globals.set('js_params', paramsProxy);
   pyodide.globals.set('js_filename', file.name);
 
   // Each runPythonAsync block returns control to the JS event loop on resolve,
@@ -283,6 +287,7 @@ preview_data = {
   const previewProxy = pyodide.globals.get('preview_data');
   const preview = previewProxy.toJs({ dict_converter: Object.fromEntries });
   previewProxy.destroy();
+  paramsProxy.destroy();
   preview.pyramidSize = params.pyramid_size;
   return { scad, svg: svgText, preview };
 }

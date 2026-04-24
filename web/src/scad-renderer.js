@@ -54,12 +54,20 @@ function safeUnlink(instance, path) {
   try { instance.FS.unlink(path); } catch { /* not present */ }
 }
 
+function clearWorkingFiles(instance) {
+  // The WASM FS persists across calls. Sweep all .svg files from / so a
+  // prior render's SVG doesn't accumulate when filenames vary across runs.
+  for (const entry of instance.FS.readdir('/')) {
+    if (entry.endsWith('.svg')) safeUnlink(instance, `/${entry}`);
+  }
+  safeUnlink(instance, '/input.scad');
+  safeUnlink(instance, '/output.stl');
+}
+
 export async function renderStl(scadText, svgFilename, svgText) {
   const instance = await getInstance();
 
-  safeUnlink(instance, '/output.stl');
-  safeUnlink(instance, '/input.scad');
-  safeUnlink(instance, `/${svgFilename}`);
+  clearWorkingFiles(instance);
 
   instance.FS.writeFile(`/${svgFilename}`, svgText);
   instance.FS.writeFile('/input.scad', scadText);

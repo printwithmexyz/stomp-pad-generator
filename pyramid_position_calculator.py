@@ -10,8 +10,15 @@ import numpy as np
 import shapely
 from shapely.geometry import Point, Polygon
 from svg.path import parse_path
-import xml.etree.ElementTree as ET
 from skimage.morphology import medial_axis
+
+# Prefer defusedxml on untrusted input. stdlib ET disables external entity
+# expansion since 3.7.1, but defusedxml is the documented best practice and
+# matters now that the same calculator is used by the public web version.
+try:
+    import defusedxml.ElementTree as ET
+except ImportError:
+    import xml.etree.ElementTree as ET
 
 
 def _log(logger, message):
@@ -242,10 +249,11 @@ def calculate_centerline_tangent(skeleton_points, x, y, sample_distance=3.0):
     # Fit a line through nearby skeleton points to get tangent
     nearby_points = skeleton_array[nearby_indices]
 
-    # Use PCA to find principal direction
+    # Use PCA to find principal direction. eigh is faster and numerically
+    # stable for symmetric matrices (covariance is symmetric).
     centered = nearby_points - nearby_points.mean(axis=0)
     cov = np.cov(centered.T)
-    eigenvalues, eigenvectors = np.linalg.eig(cov)
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
 
     # Principal component (direction of maximum variance)
     principal_direction = eigenvectors[:, np.argmax(eigenvalues)]

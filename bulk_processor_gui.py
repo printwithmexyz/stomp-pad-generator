@@ -7,8 +7,6 @@ Uses caching for faster re-processing with different parameters
 
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext
-import os
-import sys
 import json
 import queue
 import subprocess
@@ -227,7 +225,9 @@ class BulkProcessorGUI:
         self.num_threads = tk.IntVar(value=4)
 
         # Processing control
-        self.stop_requested = False
+        # threading.Event for clean cross-thread signalling — read by GUI/coordinator
+        # threads via .is_set(), set by stop button or preview Stop All via .set().
+        self.stop_requested = threading.Event()
         self.is_processing = False
         self.preview_continue_event = threading.Event()
         self.preview_approved = False
@@ -500,7 +500,7 @@ class BulkProcessorGUI:
 
             def on_stop_all():
                 self.preview_approved = False
-                self.stop_requested = True
+                self.stop_requested.set()
                 dialog.destroy()
                 self.preview_continue_event.set()
 
@@ -561,7 +561,7 @@ class BulkProcessorGUI:
             return
 
         # Reset stop flag
-        self.stop_requested = False
+        self.stop_requested.clear()
         self.is_processing = True
 
         # Update button states
@@ -592,7 +592,7 @@ class BulkProcessorGUI:
     def stop_processing(self):
         """Request to stop the current processing"""
         if self.is_processing:
-            self.stop_requested = True
+            self.stop_requested.set()
             self.log("\n" + "="*60)
             self.log("STOP REQUESTED - Finishing current file and stopping...")
             self.log("="*60)
@@ -637,7 +637,7 @@ class BulkProcessorGUI:
         """Sequential in-process path. Used when preview_debug is on or num_threads<=1."""
         files_processed = 0
         for idx, svg_file in enumerate(svg_files):
-            if self.stop_requested:
+            if self.stop_requested.is_set():
                 break
             try:
                 self.log(f"\n{'='*60}")
@@ -702,7 +702,7 @@ class BulkProcessorGUI:
             }
 
             for future in as_completed(svg_futures):
-                if self.stop_requested:
+                if self.stop_requested.is_set():
                     for f in svg_futures:
                         f.cancel()
                     break
@@ -725,12 +725,12 @@ class BulkProcessorGUI:
 
             # Drain pending STL renders before returning
             for sf in as_completed(stl_futures):
-                if self.stop_requested:
+                if self.stop_requested.is_set():
                     break
                 sf.result()
         finally:
-            svg_pool.shutdown(wait=not self.stop_requested, cancel_futures=True)
-            stl_pool.shutdown(wait=not self.stop_requested, cancel_futures=True)
+            svg_pool.shutdown(wait=not self.stop_requested.is_set(), cancel_futures=True)
+            stl_pool.shutdown(wait=not self.stop_requested.is_set(), cancel_futures=True)
             log_pump_stop.set()
             pump_thread.join(timeout=1.0)
             manager.shutdown()
@@ -756,7 +756,7 @@ class BulkProcessorGUI:
         }
 
     def _finalize_run(self, files_processed, total):
-        if self.stop_requested:
+        if self.stop_requested.is_set():
             self.log(f"\n{'='*60}")
             self.log("Processing stopped by user")
             self.log(f"Processed {files_processed}/{total} files")
@@ -845,7 +845,7 @@ class BulkProcessorGUI:
 
             approved = self.show_preview_dialog(str(debug_viz_path), svg_file.name)
 
-            if self.stop_requested:
+            if self.stop_requested.is_set():
                 self.log(f"  Processing stopped by user")
                 raise Exception("Processing stopped by user")
 
