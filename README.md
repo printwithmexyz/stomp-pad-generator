@@ -68,6 +68,8 @@ if they want STL rendering.
 - [docs/desktop.md](docs/desktop.md) — full desktop GUI guide
 - [docs/architecture.md](docs/architecture.md) — code map and cross-interface design
 - [web/README.md](web/README.md) — web subproject + Vercel deploy
+- [CHANGELOG.md](CHANGELOG.md) — release notes
+- [CONTRIBUTING.md](CONTRIBUTING.md) — how to contribute
 
 ## License
 
