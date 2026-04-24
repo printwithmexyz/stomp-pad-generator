@@ -7,16 +7,26 @@ Generates OpenSCAD code with ONLY valid positions
 """
 
 import numpy as np
-from shapely.geometry import Point, Polygon, LineString, MultiPoint
-from shapely.ops import unary_union, voronoi_diagram
+import shapely
+from shapely.geometry import Point, Polygon
 from svg.path import parse_path
-import xml.etree.ElementTree as ET
-from pathlib import Path
-from scipy.spatial import distance
-from skimage.morphology import medial_axis, skeletonize
+from skimage.morphology import medial_axis
+
+# Prefer defusedxml on untrusted input. stdlib ET disables external entity
+# expansion since 3.7.1, but defusedxml is the documented best practice and
+# matters now that the same calculator is used by the public web version.
+try:
+    import defusedxml.ElementTree as ET
+except ImportError:
+    import xml.etree.ElementTree as ET
 
 
-def parse_svg_to_polygon(svg_file, target_width=100, target_height=None, samples_per_segment=20):
+def _log(logger, message):
+    """Emit a message via the supplied logger callback, falling back to print."""
+    (logger or print)(message)
+
+
+def parse_svg_to_polygon(svg_file, target_width=100, target_height=None, samples_per_segment=20, logger=None):
     """
     Parse SVG file and convert to Shapely polygon
     Returns (polygon, svg_viewbox_info) where polygon is scaled to fit within target dimensions
@@ -50,44 +60,76 @@ def parse_svg_to_polygon(svg_file, target_width=100, target_height=None, samples
         svg_width = vb[2]
         svg_height = vb[3]
 
-    # Extract and properly sample all paths
+    # Extract and sample all supported shape elements. SVGs in the wild use
+    # <path> most of the time, but Figma / icon sets emit primitives directly.
+    NS = '{http://www.w3.org/2000/svg}'
     all_points = []
 
-    for path_elem in root.findall('.//{http://www.w3.org/2000/svg}path'):
+    def _close(pts):
+        if len(pts) > 2:
+            first = np.array(pts[0])
+            last = np.array(pts[-1])
+            if np.linalg.norm(first - last) > 0.1:
+                pts.append(pts[0])
+        return pts
+
+    for path_elem in root.findall(f'.//{NS}path'):
         d = path_elem.get('d')
         if not d:
             continue
-
         path = parse_path(d)
-
-        # Sample each segment of the path to capture curves
         path_points = []
         for segment in path:
-            # Sample multiple points along each segment
             for i in range(samples_per_segment):
                 t = i / samples_per_segment
                 point = segment.point(t)
                 path_points.append((point.real, point.imag))
-
-        # Add the final point of the last segment
         if path:
             final_point = path[-1].end
             path_points.append((final_point.real, final_point.imag))
+        all_points.extend(_close(path_points))
 
-        # Check if path is closed (first and last points are close)
-        if len(path_points) > 2:
-            first = np.array(path_points[0])
-            last = np.array(path_points[-1])
-            distance = np.linalg.norm(first - last)
+    for poly_elem in root.findall(f'.//{NS}polygon'):
+        pts_str = poly_elem.get('points', '').replace(',', ' ').split()
+        coords = [float(v) for v in pts_str]
+        pts = [(coords[i], coords[i + 1]) for i in range(0, len(coords) - 1, 2)]
+        if len(pts) >= 3:
+            all_points.extend(_close(pts))
 
-            # If not closed, force closure
-            if distance > 0.1:  # threshold for "close enough"
-                path_points.append(path_points[0])
+    for rect_elem in root.findall(f'.//{NS}rect'):
+        x = float(rect_elem.get('x', 0))
+        y = float(rect_elem.get('y', 0))
+        w = float(rect_elem.get('width', 0))
+        h = float(rect_elem.get('height', 0))
+        if w > 0 and h > 0:
+            all_points.extend([(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)])
 
-        all_points.extend(path_points)
+    circle_samples = max(samples_per_segment * 2, 64)
+    for circle_elem in root.findall(f'.//{NS}circle'):
+        cx = float(circle_elem.get('cx', 0))
+        cy = float(circle_elem.get('cy', 0))
+        r = float(circle_elem.get('r', 0))
+        if r > 0:
+            angles = np.linspace(0, 2 * np.pi, circle_samples, endpoint=True)
+            all_points.extend(zip(
+                (cx + r * np.cos(angles)).tolist(),
+                (cy + r * np.sin(angles)).tolist(),
+            ))
+
+    for ellipse_elem in root.findall(f'.//{NS}ellipse'):
+        cx = float(ellipse_elem.get('cx', 0))
+        cy = float(ellipse_elem.get('cy', 0))
+        rx = float(ellipse_elem.get('rx', 0))
+        ry = float(ellipse_elem.get('ry', 0))
+        if rx > 0 and ry > 0:
+            angles = np.linspace(0, 2 * np.pi, circle_samples, endpoint=True)
+            all_points.extend(zip(
+                (cx + rx * np.cos(angles)).tolist(),
+                (cy + ry * np.sin(angles)).tolist(),
+            ))
 
     if len(all_points) < 3:
-        print(f"ERROR: Not enough points parsed from SVG ({len(all_points)} points)")
+        _log(logger, f"ERROR: Not enough points parsed from SVG ({len(all_points)} points)")
         return None
 
     # Create polygon from sampled points
@@ -97,7 +139,7 @@ def parse_svg_to_polygon(svg_file, target_width=100, target_height=None, samples
         # Try to fix invalid polygon
         poly = poly.buffer(0)
         if not poly.is_valid:
-            print("ERROR: Could not create valid polygon from SVG")
+            _log(logger, "ERROR: Could not create valid polygon from SVG")
             return None
 
     # Get original bounds
@@ -137,13 +179,13 @@ def parse_svg_to_polygon(svg_file, target_width=100, target_height=None, samples
     final_width = bounds_scaled[2] - bounds_scaled[0]
     final_height = bounds_scaled[3] - bounds_scaled[1]
 
-    print(f"  SVG parsed: {len(all_points)} points sampled")
-    print(f"  Original size: {original_width:.1f} x {original_height:.1f}")
-    print(f"  Scaling mode: {scaling_mode} (limited by {limiting_dim})")
-    print(f"  Scale factor: {scale_factor:.4f}")
-    print(
-        f"  Scaled bounds: ({bounds_scaled[0]:.1f}, {bounds_scaled[1]:.1f}) to ({bounds_scaled[2]:.1f}, {bounds_scaled[3]:.1f})")
-    print(f"  Final size: {final_width:.1f} x {final_height:.1f}")
+    _log(logger, f"  SVG parsed: {len(all_points)} points sampled")
+    _log(logger, f"  Original size: {original_width:.1f} x {original_height:.1f}")
+    _log(logger, f"  Scaling mode: {scaling_mode} (limited by {limiting_dim})")
+    _log(logger, f"  Scale factor: {scale_factor:.4f}")
+    _log(logger,
+         f"  Scaled bounds: ({bounds_scaled[0]:.1f}, {bounds_scaled[1]:.1f}) to ({bounds_scaled[2]:.1f}, {bounds_scaled[3]:.1f})")
+    _log(logger, f"  Final size: {final_width:.1f} x {final_height:.1f}")
 
     # Return polygon and SVG viewBox info (scaled)
     svg_info = {
@@ -159,39 +201,28 @@ def parse_svg_to_polygon(svg_file, target_width=100, target_height=None, samples
 
 def calculate_skeleton(polygon, resolution=0.5):
     """
-    Calculate the centerline/skeleton of the polygon using medial axis transform
-    Returns a list of skeleton points along the centerline
-    """
-    bounds = polygon.bounds
-    min_x, min_y, max_x, max_y = bounds
+    Calculate the centerline/skeleton of the polygon using medial axis transform.
+    Returns a list of (x, y) skeleton points.
 
-    # Create a rasterized version of the polygon
+    Vectorized: shapely.contains_xy over a meshgrid is ~50-100x faster than
+    polygon.contains(Point(x, y)) per pixel, and matters a lot in Pyodide
+    where Python loops are uncached interpreted bytecode.
+    """
+    min_x, min_y, max_x, max_y = polygon.bounds
     width = int((max_x - min_x) / resolution) + 1
     height = int((max_y - min_y) / resolution) + 1
 
-    # Create binary image
-    binary_image = np.zeros((height, width), dtype=bool)
+    grid_x = min_x + np.arange(width) * resolution
+    grid_y = min_y + np.arange(height) * resolution
+    xx, yy = np.meshgrid(grid_x, grid_y)
+    binary_image = shapely.contains_xy(polygon, xx.ravel(), yy.ravel()).reshape(height, width)
 
-    for i in range(height):
-        for j in range(width):
-            x = min_x + j * resolution
-            y = min_y + i * resolution
-            if polygon.contains(Point(x, y)):
-                binary_image[i, j] = True
-
-    # Calculate medial axis (skeleton)
     skeleton = medial_axis(binary_image)
 
-    # Extract skeleton points
-    skeleton_points = []
-    for i in range(height):
-        for j in range(width):
-            if skeleton[i, j]:
-                x = min_x + j * resolution
-                y = min_y + i * resolution
-                skeleton_points.append((x, y))
-
-    return skeleton_points
+    iy, jx = np.where(skeleton)
+    xs = min_x + jx * resolution
+    ys = min_y + iy * resolution
+    return list(zip(xs.tolist(), ys.tolist()))
 
 
 def calculate_centerline_tangent(skeleton_points, x, y, sample_distance=3.0):
@@ -218,10 +249,11 @@ def calculate_centerline_tangent(skeleton_points, x, y, sample_distance=3.0):
     # Fit a line through nearby skeleton points to get tangent
     nearby_points = skeleton_array[nearby_indices]
 
-    # Use PCA to find principal direction
+    # Use PCA to find principal direction. eigh is faster and numerically
+    # stable for symmetric matrices (covariance is symmetric).
     centered = nearby_points - nearby_points.mean(axis=0)
     cov = np.cov(centered.T)
-    eigenvalues, eigenvectors = np.linalg.eig(cov)
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
 
     # Principal component (direction of maximum variance)
     principal_direction = eigenvectors[:, np.argmax(eigenvalues)]
@@ -261,7 +293,10 @@ def calculate_valid_pyramid_positions(
         pyramid_spacing=1,
         target_width=100,
         include_rotation=True,
-        safety_margin=0.5
+        safety_margin=0.5,
+        skeleton_points=None,
+        skeleton_resolution=0.3,
+        logger=None
 ):
     """
     Calculate pyramid positions using centerline/skeleton-based hexagonal packing
@@ -273,15 +308,15 @@ def calculate_valid_pyramid_positions(
         pyramid_spacing: Spacing between pyramids
         safety_margin: Inset margin from boundary edge
     """
-    print("  Calculating skeleton/centerline...")
-    # Calculate the skeleton/centerline of the shape
-    skeleton_points = calculate_skeleton(polygon, resolution=0.3)
+    if skeleton_points is None:
+        _log(logger, "  Calculating skeleton/centerline...")
+        skeleton_points = calculate_skeleton(polygon, resolution=skeleton_resolution)
 
     if not skeleton_points:
-        print("  WARNING: No skeleton points found")
+        _log(logger, "  WARNING: No skeleton points found")
         return []
 
-    print(f"  Found {len(skeleton_points)} skeleton points")
+    _log(logger, f"  Found {len(skeleton_points)} skeleton points")
 
     # Shrink polygon by safety margin to ensure pyramids stay inside
     polygon_safe = polygon.buffer(-safety_margin) if safety_margin > 0 else polygon
@@ -301,7 +336,7 @@ def calculate_valid_pyramid_positions(
     num_rows = int(np.ceil((max_y - min_y) / hex_spacing_y)) + 2
     num_cols = int(np.ceil((max_x - min_x) / hex_spacing_x)) + 2
 
-    print(f"  Testing {num_rows * num_cols} potential positions...")
+    _log(logger, f"  Testing {num_rows * num_cols} potential positions...")
 
     for row in range(num_rows):
         # Offset every other row for hex pattern
@@ -332,7 +367,7 @@ def calculate_valid_pyramid_positions(
                 else:
                     valid_positions.append([x_pos, y_pos])
 
-    print(f"  Valid positions: {len(valid_positions)}")
+    _log(logger, f"  Valid positions: {len(valid_positions)}")
     return valid_positions
 
 
@@ -341,6 +376,7 @@ def generate_openscad_with_positions(
         valid_positions,
         output_file,
         svg_info=None,
+        logger=None,
         **params
 ):
     """
@@ -450,13 +486,18 @@ module pyramids_on_surface() {
     for (pos = valid_pyramid_positions) {
 """
 
+    # Sink pyramids 0.01mm into the base so their flat bottom faces aren't
+    # coplanar with the top of the base/outline body. Coplanar shared faces
+    # crash openscad-wasm's CGAL kernel
+    # (CGAL/Nef_3/SNC_external_structure.h:1144). Visually identical;
+    # geometrically a clean intersection instead of a touching boundary.
     if has_rotation:
-        scad_code += """        translate([pos[0], pos[1], base_thickness]) {
+        scad_code += """        translate([pos[0], pos[1], base_thickness - 0.01]) {
             grip_pyramid(path_rotation=pos[2]);
         }
 """
     else:
-        scad_code += """        translate([pos[0], pos[1], base_thickness]) {
+        scad_code += """        translate([pos[0], pos[1], base_thickness - 0.01]) {
             grip_pyramid();
         }
 """
@@ -467,13 +508,14 @@ module pyramids_on_surface() {
 // ===== ASSEMBLY =====
 
 module stomp_pad_complete() {
+    // Base + raised rim as a single body. The earlier two-block formulation
+    // (separate base extrude + outlined difference) had a redundant volume —
+    // base_shape is a subset of outlined_shape, and the difference only cuts
+    // above z=base_thickness, so the base block was fully contained in the
+    // outline block. The shared face crashed openscad-wasm's CGAL kernel
+    // (CGAL/Nef_3/SNC_external_structure.h:1144). Native OpenSCAD's manifold
+    // backend tolerates it; the wasm build does not.
     union() {
-        // Base layer
-        linear_extrude(height = base_thickness) {
-            base_shape_2d();
-        }
-
-        // Raised outline border
         difference() {
             linear_extrude(height = total_height) {
                 outlined_shape_2d();
@@ -485,7 +527,6 @@ module stomp_pad_complete() {
             }
         }
 
-        // Pyramids at valid positions only
         pyramids_on_surface();
     }
 }
@@ -496,11 +537,20 @@ stomp_pad_complete();
     with open(output_file, 'w') as f:
         f.write(scad_code)
 
-    print(f"Generated {output_file}")
-    print(f"Valid pyramid positions: {len(valid_positions)}")
+    _log(logger, f"Generated {output_file}")
+    _log(logger, f"Valid pyramid positions: {len(valid_positions)}")
 
 
-def save_debug_visualization(polygon, skeleton_points, valid_positions, output_file="debug_viz.svg"):
+def _polygon_exterior_rings(geom):
+    """Yield exterior coordinate rings for Polygon or MultiPolygon."""
+    if geom.geom_type == 'Polygon':
+        yield geom.exterior.xy
+    elif geom.geom_type == 'MultiPolygon':
+        for sub in geom.geoms:
+            yield sub.exterior.xy
+
+
+def save_debug_visualization(polygon, skeleton_points, valid_positions, output_file="debug_viz.svg", logger=None):
     """
     Save a debug SVG showing the polygon boundary, skeleton, and pyramid positions
     """
@@ -511,9 +561,12 @@ def save_debug_visualization(polygon, skeleton_points, valid_positions, output_f
 
         fig, ax = plt.subplots(figsize=(12, 10))
 
-        # Plot polygon boundary
-        x, y = polygon.exterior.xy
-        ax.plot(x, y, 'b-', linewidth=2, label='Polygon Boundary')
+        # Plot polygon boundary (handles MultiPolygon from SVGs with multiple shapes)
+        first = True
+        for x, y in _polygon_exterior_rings(polygon):
+            ax.plot(x, y, 'b-', linewidth=2,
+                    label='Polygon Boundary' if first else None)
+            first = False
 
         # Plot skeleton points
         if skeleton_points:
@@ -541,11 +594,11 @@ def save_debug_visualization(polygon, skeleton_points, valid_positions, output_f
         ax.set_title('Debug Visualization: Polygon, Skeleton, and Pyramids')
 
         plt.savefig(output_file, dpi=150, bbox_inches='tight')
-        print(f"  Debug visualization saved: {output_file}")
+        _log(logger, f"  Debug visualization saved: {output_file}")
         plt.close()
 
     except ImportError:
-        print("  matplotlib not available for debug visualization")
+        _log(logger, "  matplotlib not available for debug visualization")
 
 
 def main():

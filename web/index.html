@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stomp Pad Generator</title>
+    <link rel="stylesheet" href="/src/style.css" />
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>Stomp Pad Generator</h1>
+      <p class="subtitle">
+        SVG → OpenSCAD pad with skeleton-packed pyramids. Runs entirely in your browser.
+      </p>
+    </header>
+
+    <main>
+      <section class="files-section">
+        <h2>1. Upload SVG files</h2>
+        <label class="dropzone" for="file-input">
+          <input type="file" id="file-input" accept=".svg" multiple hidden />
+          <span>Click to browse SVG files</span>
+        </label>
+        <ul id="file-list" class="file-list"></ul>
+      </section>
+
+      <section class="params-section">
+        <h2>2. Parameters</h2>
+        <form id="params-form">
+          <fieldset>
+            <legend>SVG processing</legend>
+            <label>Target width (mm)
+              <input type="number" name="target_width" value="152" step="1" />
+            </label>
+            <label>Target height (mm, 0 = auto)
+              <input type="number" name="target_height" value="0" step="1" />
+            </label>
+            <label>Samples per segment
+              <input type="number" name="samples_per_segment" value="40" step="1" />
+            </label>
+            <label>Skeleton resolution
+              <input type="number" name="skeleton_resolution" value="0.4" step="0.1" />
+            </label>
+          </fieldset>
+
+          <fieldset>
+            <legend>Pyramid packing</legend>
+            <label>Pyramid size
+              <input type="number" name="pyramid_size" value="3" step="0.1" />
+            </label>
+            <label>Pyramid spacing
+              <input type="number" name="pyramid_spacing" value="1.5" step="0.1" />
+            </label>
+            <label>Safety margin
+              <input type="number" name="safety_margin" value="0.5" step="0.1" />
+            </label>
+            <label class="checkbox">
+              <input type="checkbox" name="include_rotation" checked /> Include rotation
+            </label>
+          </fieldset>
+
+          <fieldset>
+            <legend>OpenSCAD output</legend>
+            <label>Base thickness
+              <input type="number" name="base_thickness" value="2.5" step="0.1" />
+            </label>
+            <label>Outline offset
+              <input type="number" name="outline_offset" value="2" step="0.1" />
+            </label>
+            <label>Outline height
+              <input type="number" name="outline_height" value="2" step="0.1" />
+            </label>
+            <label>Pyramid height
+              <input type="number" name="pyramid_height" value="3.5" step="0.1" />
+            </label>
+            <label>Pyramid style ($fn)
+              <input type="number" name="pyramid_style" value="4" step="1" />
+            </label>
+          </fieldset>
+
+          <fieldset>
+            <legend>Output options</legend>
+            <label class="checkbox" title="Renders in-browser via openscad-wasm (~8 MB, cached after first run)">
+              <input type="checkbox" name="generate_stl" /> Render STL
+            </label>
+          </fieldset>
+        </form>
+      </section>
+
+      <section class="actions-section">
+        <h2>3. Run</h2>
+        <div class="actions">
+          <button id="process-btn" type="button" disabled>Loading Pyodide…</button>
+          <button id="stop-btn" type="button" disabled>Stop</button>
+          <button id="clear-btn" type="button">Clear results</button>
+        </div>
+      </section>
+
+      <section class="results-section">
+        <h2>Results</h2>
+        <div id="results" class="results"></div>
+      </section>
+
+      <section class="console-section">
+        <h2>Console</h2>
+        <pre id="console" class="console"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
