@@ -7,6 +7,11 @@ const OPENSCAD_URL = '/openscad/openscad.js';
 
 let factoryPromise = null;
 let instancePromise = null;
+// Buffers reset before each render so we can attribute messages to the run
+// that produced them (and surface them in the error message if callMain
+// throws — Emscripten otherwise rethrows raw exception pointers like 21437176).
+const stdoutLines = [];
+const stderrLines = [];
 
 function loadFactory() {
   // Vite forbids `import()` against /public files from source code (even with
@@ -45,7 +50,15 @@ function loadFactory() {
 async function getInstance() {
   if (!instancePromise) {
     const OpenSCAD = await loadFactory();
-    instancePromise = OpenSCAD();
+    // noInitialRun is critical: without it Emscripten runs main() on init
+    // (with no args), which aborts immediately. Subsequent callMain calls
+    // then throw "program has already aborted!" The 2022 build's thin wrapper
+    // set this default; the 2025 monolithic loader doesn't.
+    instancePromise = OpenSCAD({
+      noInitialRun: true,
+      print: (msg) => stdoutLines.push(msg),
+      printErr: (msg) => stderrLines.push(msg),
+    });
   }
   return instancePromise;
 }
@@ -64,15 +77,45 @@ function clearWorkingFiles(instance) {
   safeUnlink(instance, '/output.stl');
 }
 
+function describeOpenscadError(thrown, instance) {
+  // Emscripten throws a numeric pointer into WASM memory for C++ exceptions.
+  // Try the documented helper if the build exposes it; otherwise fall through
+  // to the buffered stderr we captured via the printErr override.
+  if (typeof thrown === 'number') {
+    if (instance && typeof instance.getExceptionMessage === 'function') {
+      try {
+        const [name, msg] = instance.getExceptionMessage(thrown);
+        return `OpenSCAD: ${name}: ${msg}`;
+      } catch { /* helper not available or failed */ }
+    }
+    return `OpenSCAD aborted (Emscripten exception ${thrown})`;
+  }
+  if (thrown instanceof Error) return thrown.message;
+  return String(thrown);
+}
+
 export async function renderStl(scadText, svgFilename, svgText) {
   const instance = await getInstance();
 
   clearWorkingFiles(instance);
+  stdoutLines.length = 0;
+  stderrLines.length = 0;
 
   instance.FS.writeFile(`/${svgFilename}`, svgText);
   instance.FS.writeFile('/input.scad', scadText);
 
-  instance.callMain(['/input.scad', '-o', '/output.stl']);
+  try {
+    instance.callMain(['/input.scad', '-o', '/output.stl']);
+  } catch (e) {
+    const reason = describeOpenscadError(e, instance);
+    const tail = stderrLines.slice(-5).join('\n').trim();
+    throw new Error(tail ? `${reason}\n${tail}` : reason);
+  }
 
-  return instance.FS.readFile('/output.stl');
+  try {
+    return instance.FS.readFile('/output.stl');
+  } catch {
+    const tail = stderrLines.slice(-5).join('\n').trim();
+    throw new Error(`OpenSCAD produced no output${tail ? `:\n${tail}` : ''}`);
+  }
 }

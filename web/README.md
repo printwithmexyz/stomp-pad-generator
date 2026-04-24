@@ -49,12 +49,13 @@ That's it. Vercel runs `npm install` (which triggers `prepare` via the
 ## Notes
 
 - All processing is client-side; no SVG ever leaves the user's browser.
-- STL rendering runs in-browser via
-  [openscad-wasm](https://github.com/openscad/openscad-wasm). The release
-  assets (`openscad.js`, `openscad.wasm`, `openscad.wasm.js`, ~8 MB) are
-  downloaded by `scripts/prepare.js` into `public/openscad/` on first install
-  and cached on disk from then on. Bump `OPENSCAD_VERSION` in `prepare.js` to
-  upgrade.
+- STL rendering runs in-browser via openscad-wasm. We pull the official
+  OpenSCAD playground build (`files.openscad.org/playground/...`, manifold
+  backend, ~10 MB) instead of the GitHub releases (last tagged 2022,
+  CGAL-only — that build asserts on geometry the manifold backend handles
+  cleanly). `scripts/prepare.js` downloads + unzips into `public/openscad/`
+  on first install, writes a VERSION file, and skips the work on subsequent
+  installs. Bump `OPENSCAD_VERSION` in `prepare.js` to upgrade.
 - Pyodide can't use multiprocessing, so multi-file uploads run sequentially.
   The desktop app's process pool is the way to go for bulk batches.
 

@@ -486,13 +486,18 @@ module pyramids_on_surface() {
     for (pos = valid_pyramid_positions) {
 """
 
+    # Sink pyramids 0.01mm into the base so their flat bottom faces aren't
+    # coplanar with the top of the base/outline body. Coplanar shared faces
+    # crash openscad-wasm's CGAL kernel
+    # (CGAL/Nef_3/SNC_external_structure.h:1144). Visually identical;
+    # geometrically a clean intersection instead of a touching boundary.
     if has_rotation:
-        scad_code += """        translate([pos[0], pos[1], base_thickness]) {
+        scad_code += """        translate([pos[0], pos[1], base_thickness - 0.01]) {
             grip_pyramid(path_rotation=pos[2]);
         }
 """
     else:
-        scad_code += """        translate([pos[0], pos[1], base_thickness]) {
+        scad_code += """        translate([pos[0], pos[1], base_thickness - 0.01]) {
             grip_pyramid();
         }
 """
@@ -503,13 +508,14 @@ module pyramids_on_surface() {
 // ===== ASSEMBLY =====
 
 module stomp_pad_complete() {
+    // Base + raised rim as a single body. The earlier two-block formulation
+    // (separate base extrude + outlined difference) had a redundant volume —
+    // base_shape is a subset of outlined_shape, and the difference only cuts
+    // above z=base_thickness, so the base block was fully contained in the
+    // outline block. The shared face crashed openscad-wasm's CGAL kernel
+    // (CGAL/Nef_3/SNC_external_structure.h:1144). Native OpenSCAD's manifold
+    // backend tolerates it; the wasm build does not.
     union() {
-        // Base layer
-        linear_extrude(height = base_thickness) {
-            base_shape_2d();
-        }
-
-        // Raised outline border
         difference() {
             linear_extrude(height = total_height) {
                 outlined_shape_2d();
@@ -521,7 +527,6 @@ module stomp_pad_complete() {
             }
         }
 
-        // Pyramids at valid positions only
         pyramids_on_surface();
     }
 }
