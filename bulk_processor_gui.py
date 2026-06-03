@@ -17,13 +17,17 @@ from datetime import datetime
 import threading
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
-# Import the pyramid calculator functions
-from pyramid_position_calculator import (
+# Import the pyramid calculator functions. The shared geometry pipeline
+# moved into the stomppad package in v2 Phase 0; the top-level
+# pyramid_position_calculator.py module is now a re-export shim for older
+# callers (frozen binaries, user scripts). New code targets stomppad
+# directly so Phase 1+ refactors don't have to hop through the shim.
+from stomppad import (
     parse_svg_to_polygon,
     calculate_skeleton,
     calculate_valid_pyramid_positions,
     generate_openscad_with_positions,
-    save_debug_visualization
+    save_debug_visualization,
 )
 
 

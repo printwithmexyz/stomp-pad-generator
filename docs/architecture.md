@@ -27,6 +27,31 @@ into `stomppad/`. The top-level file is now a thin re-export shim, so
 `import pyramid_position_calculator` and `python pyramid_position_calculator.py`
 keep working unchanged for existing callers and the standalone `main()`.
 
+Phase 1.1 split SVG parsing out into `stomppad.geometry`. Each path
+subpath / rect / polygon / circle / ellipse becomes its own ring, even-odd
+nesting decides which rings are holes vs. nested bodies, and a heuristic
+(>=95% viewBox coverage AND bbox-fill >=0.999) drops near-full-canvas
+rectangular backgrounds. The original `parse_svg_to_polygon` is now a
+thin shim over `parse_svg_to_components` + `unary_union` so existing
+single-polygon callers (the desktop packer, the web preview) keep
+working. Phase 1.5's test suite is where the multi-ring assertions land.
+
+Phase 1.4 added `stomppad.project` — the `ShapeProject` dataclass that
+both frontends will round-trip through in Phase 2. Schema is versioned
+from day one (`SCHEMA_VERSION = 1`) so sidecar `.project.json` files that
+land on users' disks in Phase 2.3 can be migrated rather than rejected by
+future builds.
+
+Phase 1.2 / 1.3 split skeleton, footprint, and hex placement out into
+`stomppad.packing`, and introduced `stomppad.patterns` — a registry of
+placement strategies (skeleton-following / uniform hex / rectangular /
+triangular). `pack_component(component, ..., pattern="hexagonal")`
+resolves the strategy by name and runs the shared footprint validation
+(prepared-geometry `contains` tests for the speedup and thin-neck fix
+called out in the plan). `PackContext` caches per-component skeletons so
+Phase 2's "re-pack only edited bodies" can avoid recomputing untouched
+medial axes — the slow step in Pyodide.
+
 ### Web sync (manifest, not zip)
 
 `web/scripts/prepare.js` walks the `stomppad/` directory and writes
@@ -138,8 +163,22 @@ it themselves if they want STL rendering.
 ## File map
 
 ```
-stomppad/                         geometry pipeline (Phase 1 will split this
-└── __init__.py                   into geometry/packing/patterns/project)
+stomppad/
+├── __init__.py                   parse_svg_to_polygon shim + OpenSCAD
+│                                 generation + standalone main()
+├── geometry.py                   Phase 1.1 — Component, parse_svg_to_components
+│                                 (multi-ring, hole-aware, background drop)
+├── packing.py                    Phase 1.2 — skeleton, footprint, hex
+│                                 placement; pack_component + PackContext
+│                                 cache; prepared-geometry contains tests
+├── patterns/                     Phase 1.3 — pluggable placement strategies
+│   ├── __init__.py               PatternStrategy protocol + registry
+│   ├── skeleton.py               skeleton-following hex (default)
+│   ├── hexagonal.py              uniform hex, no rotation
+│   ├── rectangular.py            square grid
+│   └── triangular.py             triangular lattice
+└── project.py                    Phase 1.4 — Body, ShapeProject, schema_v1
+                                  JSON contract for both frontends
 pyramid_position_calculator.py    re-export shim → stomppad (back-compat)
 bulk_processor_gui.py             tkinter GUI + process pool + STL queue
 bulk_processor.spec               PyInstaller spec (used by CI)
