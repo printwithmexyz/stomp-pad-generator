@@ -102,11 +102,21 @@ unblocks every later phase. Small and mechanical.
   unpacks it into Pyodide's FS and imports the package. (~15 lines; no new dep.)
 - Desktop import path updated; `bulk_processor.spec` datas updated so frozen
   binaries include the package.
-- No behavior change. Regression check: existing single-shape output identical.
+- No behavior change. **Regression guard:** there is no test harness in the repo
+  today (no `tests/`, no pytest dep). So Phase 0 cannot lean on the Phase 1.5
+  fixture — that would be circular. Instead, Phase 0 ships a *minimal* golden
+  test: pick one representative single-shape SVG, capture its current
+  `.scad`/positions output **before** the refactor, and assert byte-identical
+  output after. This is the smallest thing that makes "no behavior change"
+  enforceable rather than asserted, and Phase 1.5 expands it into the full suite.
+- **New dependency:** `pytest` (dev only). Flagged here per `CLAUDE.md`; add to a
+  `requirements-dev.txt` (new) in the same commit that introduces the test.
 
 **Files (≤5):** `stomppad/__init__.py` (new, mostly moved code),
 `web/scripts/prepare.js`, `web/src/main.js`, `bulk_processor.spec`,
-`docs/architecture.md`.
+`docs/architecture.md` (**update** — file already exists; do not overwrite).
+The golden test + `requirements-dev.txt` land in a **second Phase 0 response**
+(separate gate) to stay under the 5-file cap.
 
 ---
 
@@ -121,7 +131,14 @@ Delivers correct batch output on real files (the smiley) with no UI work.
   **with interior rings preserved**, built via `unary_union` + `polygonize`
   (even-odd nesting resolved) instead of one `Polygon(all_points)`.
 - **Background auto-drop:** exclude any ring covering ≥95% of the viewBox area
-  (configurable threshold; recorded so the editor can re-add).
+  (configurable threshold; recorded so the editor can re-add). Area alone is a
+  weak signal — a full-bleed badge or rounded-rect tile is legitimately
+  near-canvas and must **not** vanish. So require **two** conditions: high
+  coverage **and** the ring is a near-perfect axis-aligned rectangle (the
+  smiley's background is a `rect`; that's the real tell). In **batch mode**,
+  every auto-drop emits a warning to the log — the zero-click sidecar path has
+  no human watching the canvas, so a silently dropped body is otherwise
+  invisible.
 - **Capture `fill`** per component for later color defaults.
 - Keep `parse_svg_to_polygon` as a shim (returns `unary_union(components)`) so
   nothing breaks in one commit.
@@ -131,7 +148,14 @@ Delivers correct batch output on real files (the smiley) with no UI work.
 - Replace per-point `polygon_safe.contains(footprint)` with
   `shapely.prepared.prep(...)` batch tests — speedup **and** the correctness fix
   for thin necks (the melt drips).
-- Per-component skeleton (medial axis of that component only).
+- Per-component skeleton (medial axis of that component only). **Cost note:**
+  `medial_axis` rasterizes to a binary image, so N components = N
+  rasterizations — and this is already the slow path in Pyodide (see the
+  `contains_xy`-vs-per-pixel comment in `calculate_skeleton`). Skeletons must be
+  cached per component and recomputed only for edited bodies, or large
+  multi-body files regress on pack time even as they improve on correctness.
+  This is the geometry-side prerequisite for Phase 2's "re-pack only edited
+  bodies."
 
 ### 1.3 Pattern registry (`stomppad/patterns/`)
 - `PatternStrategy` protocol: `generate_positions(body, solid_geom) -> [(x,y,rot)]`.
@@ -143,7 +167,11 @@ Delivers correct batch output on real files (the smiley) with no UI work.
 ### 1.4 ShapeProject model (`stomppad/project.py`)
 - `Component(id, exterior, holes, bbox, area, source_fill)`,
   `Body(id, name, component_ids, color_hex, enabled, pattern, pyramid_overrides)`,
-  `ShapeProject(components, bodies, global_params, svg_info)`.
+  `ShapeProject(schema_version, components, bodies, global_params, svg_info)`.
+- **Version the schema from day one.** Once the sidecar `.project.json` lands on
+  users' disks next to their SVGs (Phase 2.3), its format is effectively public.
+  A `schema_version` field added now lets Phase 2/3 migrate old sidecars instead
+  of breaking them; `from_json()` rejects/migrates on mismatch.
 - `to_json()/from_json()` (cross-frontend contract). Default grouping: each
   top-level component → own body; holes attach to parent; **body color
   defaults to imported `source_fill`**; default pattern = skeleton.
@@ -164,6 +192,12 @@ tests) to respect the 5-file cap. Gate after each.
 **Goal:** Click subshapes; group into bodies (incl. disjoint); toggle bodies for
 pyramid generation; set per-body pattern + color + pyramid overrides; flip inner
 loops hole↔body. All edits flow through the `ShapeProject` API.
+
+> **Re-interview before starting Phase 2.** Per `CLAUDE.md` (3+ steps /
+> architectural decisions → interview first), this phase is the riskiest:
+> two-frontend UI state, hit-test parity, and re-pack-on-edit are where
+> estimates break. Treat this plan as *directional* for Phase 2 — it inherits
+> Phase 0/1 sign-off but needs its own interview + gate before code.
 
 ### 2.1 Shared selection/edit API (`stomppad/project.py`)
 - `hit_test(x,y)->component_id` (holes excluded), `assign_to_body`,
@@ -199,7 +233,11 @@ loops hole↔body. All edits flow through the `ShapeProject` API.
   per body and a base material/color per object — standard 3MF, imports into any
   modern slicer. No Bambu-specific config.
 - Automated test: zip parses, N objects, N colors, valid against 3MF core schema
-  shape.
+  shape. **Caveat:** structural validity ≠ slicer acceptance — generic 3MF color
+  rides a material extension that slicers read inconsistently, so "imports into
+  any modern slicer" is unproven by the schema check alone. Acceptance must name
+  **one concrete target slicer** (e.g. PrusaSlicer) and confirm a manual import
+  shows N objects with the right colors before this is called done.
 
 ### 3.4 UI wiring
 - Web + desktop: "Export → STL set / 3MF" using each body's assigned color.
@@ -211,13 +249,15 @@ loops hole↔body. All edits flow through the `ShapeProject` API.
 ## Cross-cutting
 
 - **Backward compatibility:** single-shape SVG → one component → one body →
-  current output. Regression fixture locks this from Phase 0 on.
+  current output. Locked by the Phase 0 golden test (one captured single-shape
+  output, asserted byte-identical), which Phase 1.5 grows into the full suite.
 - **Web/desktop parity:** the whole `stomppad/` package syncs via the zip step
   (Phase 0), so browser and desktop never drift — including new patterns/exporters.
 - **Performance:** prepared-geometry test speeds up the hot loop; per-body
   re-pack avoids recomputing untouched bodies on edits.
-- **Dependencies:** none new expected through Phase 3 (3MF is hand-authored
-  zip+XML). Any addition flagged first per CLAUDE.md.
+- **Dependencies:** no new *runtime* deps through Phase 3 (3MF is hand-authored
+  zip+XML). One new *dev* dep: `pytest` (Phase 0, for the regression guard). Any
+  further addition flagged first per CLAUDE.md.
 - **Docs/CHANGELOG:** updated in whichever phase changes behavior.
 
 ## Resolved since first draft
