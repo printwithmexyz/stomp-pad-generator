@@ -179,18 +179,27 @@ async function initPyodide() {
   log('Installing svg.path from PyPI…');
   const micropip = pyodide.pyimport('micropip');
   await micropip.install('svg.path');
-  log('Loading calculator module…');
-  const resp = await fetch('/pyramid_position_calculator.py');
-  if (!resp.ok) throw new Error(`Failed to fetch calculator: ${resp.status}`);
-  const src = await resp.text();
-  pyodide.FS.writeFile('/pyramid_position_calculator.py', src);
+  log('Loading stomppad package…');
+  // Built by web/scripts/prepare.js: walks ../stomppad/ and inlines every
+  // .py source. Writing the files into Pyodide's FS under /stomppad/ lets
+  // a single `import stomppad` follow Python's normal package resolution.
+  const resp = await fetch('/stomppad-manifest.json');
+  if (!resp.ok) throw new Error(`Failed to fetch stomppad manifest: ${resp.status}`);
+  const manifest = await resp.json();
+  // mkdirTree is idempotent; mkdir would throw EEXIST on a re-init path.
+  pyodide.FS.mkdirTree('/stomppad');
+  for (const file of manifest.files) {
+    const fullPath = `/stomppad/${file.path}`;
+    pyodide.FS.mkdirTree(fullPath.slice(0, fullPath.lastIndexOf('/')));
+    pyodide.FS.writeFile(fullPath, file.content);
+  }
   pyodide.runPython(`
 import sys
 if '/' not in sys.path:
     sys.path.insert(0, '/')
-import pyramid_position_calculator
+import stomppad
 `);
-  log('Pyodide ready.');
+  log(`Pyodide ready (stomppad: ${manifest.files.length} module${manifest.files.length === 1 ? '' : 's'}).`);
 }
 
 async function processOne(file, params) {
@@ -210,7 +219,7 @@ async function processOne(file, params) {
   // Worker; this is the bandage).
 
   await pyodide.runPythonAsync(`
-from pyramid_position_calculator import (
+from stomppad import (
     parse_svg_to_polygon,
     calculate_skeleton,
     calculate_valid_pyramid_positions,

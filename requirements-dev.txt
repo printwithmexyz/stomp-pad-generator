@@ -1,0 +1,18 @@
+-r requirements_bulk_processor.txt
+
+# Dev-only: pytest for the regression-test harness (tests/).
+# Plan ref: docs/v2-plan.md Phase 0 — minimal golden test asserting that the
+# package move produces byte-identical scad output for a captured fixture.
+pytest>=8.0
+
+# Pinned tightly because tests/test_regression.py asserts byte-equality
+# against a captured .scad. medial_axis (scikit-image) and eigh (numpy)
+# are deterministic within a library version but can shift by ±1 ULP across
+# minor versions / BLAS implementations, which would flip the f"{x:.3f}"
+# formatting of a position and break the byte check.
+#
+# When intentionally bumping either pin, re-run
+#   python tests/fixtures/_capture_golden.py
+# and inspect the diff before committing the new sample_golden.scad.
+numpy==2.4.6
+scikit-image==0.26.0

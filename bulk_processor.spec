@@ -4,7 +4,16 @@
 
 import sys
 
+from PyInstaller.utils.hooks import collect_submodules
+
 block_cipher = None
+
+# The geometry pipeline lives in the ``stomppad`` package (Phase 0 of v2);
+# the top-level ``pyramid_position_calculator`` is a thin re-export shim.
+# ``collect_submodules`` walks the package so Phase 1's split modules
+# (geometry, packing, patterns, project) are picked up without re-touching
+# this spec.
+stomppad_hiddenimports = collect_submodules('stomppad')
 
 a = Analysis(
     ['bulk_processor_gui.py'],
@@ -19,6 +28,7 @@ a = Analysis(
         'scipy.spatial',
         'PIL.Image',
         'PIL.ImageTk',
+        *stomppad_hiddenimports,
     ],
     hookspath=[],
     hooksconfig={},

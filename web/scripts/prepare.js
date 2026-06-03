@@ -1,14 +1,15 @@
 // Sync runtime assets into public/ so the same-origin fetches at runtime work.
-//   1. Calculator module (single source of truth in the parent project).
+//   1. stomppad/ Python package (single source of truth in the parent project),
+//      bundled as a JSON manifest that main.js unpacks into Pyodide's FS.
 //   2. openscad-wasm (downloaded from files.openscad.org, unzipped, cached).
 // Runs automatically before `dev` and `build`; can also be invoked via `npm run prepare`.
 
 import {
-  copyFileSync, mkdirSync, existsSync, writeFileSync, readFileSync,
-  rmSync, unlinkSync,
+  mkdirSync, existsSync, writeFileSync, readFileSync,
+  readdirSync, lstatSync, rmSync, unlinkSync,
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { dirname, resolve, relative } from 'node:path';
 import extract from 'extract-zip';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -17,15 +18,47 @@ const publicDir = resolve(root, 'public');
 
 mkdirSync(publicDir, { recursive: true });
 
-// --- 1. calculator -----------------------------------------------------------
-const calcSrc = resolve(root, '..', 'pyramid_position_calculator.py');
-const calcDest = resolve(publicDir, 'pyramid_position_calculator.py');
-if (!existsSync(calcSrc)) {
-  console.error(`prepare.js: calculator source not found at ${calcSrc}`);
+// --- 1. stomppad manifest ----------------------------------------------------
+// Walk stomppad/ and emit a JSON manifest with each .py file inlined as a
+// string. main.js fetches the manifest once at boot and writes each entry to
+// Pyodide's virtual FS. Phase 1 will add submodules (geometry, packing,
+// patterns, project); this walk picks them up automatically.
+//
+// Why a manifest and not a real .zip: Node has no built-in zip writer, and
+// the v2 plan called for "no new dep". Pyodide can `unpackArchive` a real
+// zip if/when we add binary assets; for an all-text package, a manifest is
+// the smaller, debuggable choice and keeps prepare.js dependency-free.
+const stomppadSrc = resolve(root, '..', 'stomppad');
+const manifestDest = resolve(publicDir, 'stomppad-manifest.json');
+if (!existsSync(stomppadSrc)) {
+  console.error(`prepare.js: stomppad package not found at ${stomppadSrc}`);
   process.exit(1);
 }
-copyFileSync(calcSrc, calcDest);
-console.log(`prepare.js: synced calculator -> ${calcDest}`);
+
+function walk(dir, base = dir) {
+  const out = [];
+  for (const name of readdirSync(dir)) {
+    if (name === '__pycache__') continue;
+    const full = resolve(dir, name);
+    // lstat, not stat: never recurse through a symlink. A symlinked subdir
+    // could loop back into the package and produce an unbounded manifest.
+    const st = lstatSync(full);
+    if (st.isSymbolicLink()) continue;
+    if (st.isDirectory()) {
+      out.push(...walk(full, base));
+    } else if (name.endsWith('.py')) {
+      out.push({
+        path: relative(base, full).replaceAll('\\', '/'),
+        content: readFileSync(full, 'utf8'),
+      });
+    }
+  }
+  return out;
+}
+
+const files = walk(stomppadSrc);
+writeFileSync(manifestDest, JSON.stringify({ files }));
+console.log(`prepare.js: synced stomppad/ (${files.length} files) -> ${manifestDest}`);
 
 // --- 2. openscad-wasm --------------------------------------------------------
 // We use the official OpenSCAD playground build (manifold backend, 2025+)

@@ -6,22 +6,46 @@ This doc is for contributors. End users want
 ## Single source of truth
 
 ```
-pyramid_position_calculator.py
+stomppad/                            (Python package — single source of truth)
         │
-        ├── used by → bulk_processor_gui.py    (desktop, runs in worker processes)
-        └── synced into web/public/ at build → loaded by Pyodide in the browser
+        ├── re-exported by → pyramid_position_calculator.py   (shim, kept for
+        │                                                      back-compat)
+        ├── used by        → bulk_processor_gui.py    (desktop; PyInstaller
+        │                                              picks up submodules via
+        │                                              collect_submodules)
+        └── synced into web/public/stomppad-manifest.json at build
+            → unpacked into Pyodide's FS by web/src/main.js
 ```
 
 The whole geometry pipeline (SVG → polygon → medial-axis skeleton →
-hex-packed pyramid placement → OpenSCAD source) lives in one Python module.
-Both interfaces import the same functions; nothing is reimplemented per
-platform. The web project's `scripts/prepare.js` copies the parent file into
-`web/public/pyramid_position_calculator.py` before every `dev` and `build`
-so the browser and desktop never drift.
+hex-packed pyramid placement → OpenSCAD source) lives in the `stomppad`
+package. Both interfaces import the same functions; nothing is reimplemented
+per platform.
+
+Phase 0 packaged the previous monolithic `pyramid_position_calculator.py`
+into `stomppad/`. The top-level file is now a thin re-export shim, so
+`import pyramid_position_calculator` and `python pyramid_position_calculator.py`
+keep working unchanged for existing callers and the standalone `main()`.
+
+### Web sync (manifest, not zip)
+
+`web/scripts/prepare.js` walks the `stomppad/` directory and writes
+`web/public/stomppad-manifest.json` — a JSON object of
+`{files: [{path, content}]}` with every `.py` source inlined. `main.js`
+fetches the manifest once, writes each entry to Pyodide's virtual FS under
+`/stomppad/`, then imports the package.
+
+The v2 plan originally proposed a `.zip` archive, but Node has no built-in
+zip writer and the plan also required "no new dep / ~15 lines"; a JSON
+manifest satisfies both constraints with no archive library on either side.
+Pyodide's `unpackArchive('zip')` could replace this later if the package
+ever grows binary assets — the wire format is the only thing that would
+change, not the contract.
 
 ## Logger callback pattern
 
-Every public function in `pyramid_position_calculator.py` accepts an optional
+Every public function in `stomppad` (and therefore the
+`pyramid_position_calculator` shim) accepts an optional
 `logger=` callable:
 
 ```python
@@ -32,8 +56,9 @@ def parse_svg_to_polygon(svg_file, ..., logger=None):
 `_log(logger, msg)` calls `logger(msg)` if provided, else falls back to
 `print`. This is what lets the desktop GUI surface calculator output in its
 Console tab and the browser surface it in its on-page console — both pass
-their own callback. Standalone use (`python pyramid_position_calculator.py`)
-still prints to stdout.
+their own callback. Standalone use (`python pyramid_position_calculator.py`
+via the shim, or `python -m stomppad` once a `__main__.py` is added) still
+prints to stdout.
 
 ## Desktop concurrency model
 
@@ -73,10 +98,12 @@ What does run concurrently in the browser:
 
 ## Web ↔ Pyodide interop
 
-`web/src/main.js` writes the uploaded SVG to Pyodide's virtual FS as
-`/input.svg`, sets the parameter dict via `pyodide.toPy(params)` as a global,
-then calls into the calculator. The Python logger callback marshals strings
-back to the JS `log()` function for the on-page console.
+On bootstrap, `web/src/main.js` fetches `stomppad-manifest.json` (produced
+by `prepare.js`), writes each entry into Pyodide's FS at `/stomppad/<path>`,
+then imports the package. At process time it writes the uploaded SVG to
+`/input.svg`, sets the parameter dict via `pyodide.toPy(params)` as a
+global, then calls into the calculator. The Python logger callback marshals
+strings back to the JS `log()` function for the on-page console.
 
 After processing, preview data is materialized into a Python dict
 (polygon exterior rings, skeleton points, valid positions) and pulled to JS
@@ -111,14 +138,22 @@ it themselves if they want STL rendering.
 ## File map
 
 ```
-pyramid_position_calculator.py    geometry pipeline + standalone main()
+stomppad/                         geometry pipeline (Phase 1 will split this
+└── __init__.py                   into geometry/packing/patterns/project)
+pyramid_position_calculator.py    re-export shim → stomppad (back-compat)
 bulk_processor_gui.py             tkinter GUI + process pool + STL queue
 bulk_processor.spec               PyInstaller spec (used by CI)
 .github/workflows/build.yml       cross-platform binary builds + releases
+tests/
+├── fixtures/sample.svg           single-shape regression fixture
+├── fixtures/sample_golden.scad   captured pre-refactor scad output
+├── fixtures/_capture_golden.py   one-shot recapture script (manual)
+└── test_regression.py            asserts byte-identical scad output
+requirements-dev.txt              pytest (for tests/)
 web/
 ├── index.html                    upload form + console + result cards
 ├── package.json                  vite + three (Pyodide loaded from CDN)
-├── scripts/prepare.js            sync calc + download openscad-wasm
+├── scripts/prepare.js            build stomppad-manifest.json + fetch openscad-wasm
 └── src/
     ├── main.js                   Pyodide bootstrap + processing loop
     ├── scad-renderer.js          openscad-wasm wrapper (Vite workaround)
@@ -127,6 +162,7 @@ web/
     └── style.css
 docs/
 ├── desktop.md                    end-user guide for the GUI
+├── v2-plan.md                    multicolor / interactive editor roadmap
 └── architecture.md               this file
 ```
 
