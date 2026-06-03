@@ -239,6 +239,73 @@ def test_unknown_pattern_raises_with_helpful_listing():
 
 
 # --------------------------------------------------------------------------- #
+# Coverage gaps surfaced by the round-2 review
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_svg_to_components_returns_none_on_no_shapes(tmp_path):
+    """Empty / shapeless SVG must return None, not raise — every caller
+    in production gates on the None check."""
+    svg = _write_svg(
+        tmp_path,
+        "empty.svg",
+        """<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"></svg>""",
+    )
+    assert parse_svg_to_components(str(svg), target_width=80) is None
+
+
+def test_component_from_dict_round_trips_holes_and_fill(tmp_path):
+    """The Phase 1 ShapeProject round-trip test only checks the project
+    surface; a hole silently dropped during Component.from_dict would
+    pass that test. Lock the per-component round-trip explicitly."""
+    svg = _write_svg(tmp_path, "donut.svg", DONUT)
+    components, _info = parse_svg_to_components(str(svg), target_width=60)
+    original = components[0]
+    assert original.holes, "donut fixture must produce a hole"
+    restored = Component.from_dict(original.to_dict())
+    assert len(restored.holes) == len(original.holes)
+    assert restored.holes[0] == original.holes[0]
+    assert restored.exterior == original.exterior
+    assert restored.bbox == original.bbox
+    assert restored.area == pytest.approx(original.area)
+    assert restored.source_fill == original.source_fill
+
+
+def test_body_output_cache_invalidate_body_direct(tmp_path):
+    """The Phase 2 tests only exercise invalidation via project events.
+    Lock the public BodyOutputCache.invalidate_body API directly so a
+    silent regression in the manual-invalidation path is caught."""
+    from stomppad import BodyOutputCache
+
+    svg = _write_svg(tmp_path, "disjoint.svg", DISJOINT)
+    components, info = parse_svg_to_components(str(svg), target_width=80)
+    project = ShapeProject.default_from_components(components, info)
+    cache = BodyOutputCache(project)
+    before = cache.positions_for(0)
+    cache.invalidate_body(0)
+    after = cache.positions_for(0)
+    assert before is not after, "invalidate_body must drop the memo"
+    assert before == after, "geometry unchanged → positions should match"
+
+
+def test_body_output_cache_invalidate_all_direct(tmp_path):
+    from stomppad import BodyOutputCache
+
+    svg = _write_svg(tmp_path, "disjoint.svg", DISJOINT)
+    components, info = parse_svg_to_components(str(svg), target_width=80)
+    project = ShapeProject.default_from_components(components, info)
+    cache = BodyOutputCache(project)
+    a0 = cache.positions_for(0)
+    a1 = cache.positions_for(1)
+    cache.invalidate_all()
+    b0 = cache.positions_for(0)
+    b1 = cache.positions_for(1)
+    assert b0 is not a0, "invalidate_all must drop body 0"
+    assert b1 is not a1, "invalidate_all must drop body 1"
+
+
+# --------------------------------------------------------------------------- #
 # ShapeProject JSON round-trip
 # --------------------------------------------------------------------------- #
 

@@ -1,9 +1,17 @@
 # Desktop GUI Guide
 
-The tkinter app in `bulk_processor_gui.py` is the production interface for
-bulk batches. It runs the geometry pipeline in worker processes (true
-parallelism via `ProcessPoolExecutor`) and renders STLs through a separate
-thread pool that overlaps with SVG processing on the next files.
+The tkinter app in `bulk_processor_gui.py` has two production interfaces in
+one window: the **batch processor** (Files & Folders / Parameters /
+Console tabs) and the **single-file editor** (Edit tab, added in v2).
+
+- Batch runs the geometry pipeline in worker processes (true parallelism
+  via `ProcessPoolExecutor`) and renders STLs through a separate thread
+  pool that overlaps with SVG processing on the next files.
+- The Edit tab opens one SVG at a time, lets you group components,
+  pick per-body colors / patterns / pyramid-size overrides, and export
+  either an STL set (one per body) or a generic `.3mf`. It auto-saves a
+  `<svg-stem>.project.json` sidecar next to the SVG so your edits
+  survive across sessions.
 
 ## Requirements
 
@@ -97,6 +105,61 @@ Streams everything from the worker processes (and from the calculator's own
 - SVGs that produced an unexpectedly small / large skeleton.
 - Cache hits vs reprocessing.
 - OpenSCAD stderr when STL render fails.
+- Edit-tab events: file load, body color / pattern changes, sidecar save
+  status, per-body render times during Export.
+
+## Edit tab (v2)
+
+Single-file interactive editor. Use it when batch defaults aren't enough
+and you want to refine one design: group components, pick colors per
+body, swap patterns, override pyramid size on specific bodies, then
+export the multicolor result.
+
+### Workflow
+
+1. Click **Open SVG…** and pick one file. The canvas renders each
+   component colored by its body; the right sidebar lists every body.
+2. Click a component on the canvas to select it (the outline turns
+   blue). Shift-click to add components to the selection.
+3. **Group selected** in the sidebar creates a new body containing the
+   selected components.
+4. Per-body controls in the sidebar:
+   - color swatch → click to open the OS color picker
+   - **on** checkbox → toggle whether the body gets pyramids and is
+     included in exports
+   - **pattern** dropdown → `skeleton` / `hexagonal` / `rectangular` /
+     `triangular`
+   - **size** entry → per-body pyramid-size override (blank = use the
+     global value from the Parameters tab)
+5. **Auto-save sidecar** (top toolbar, on by default) — every edit
+   debounces a write of `<svg-stem>.project.json` next to the source
+   SVG. Toggle off if you want manual control; the **Save sidecar
+   now** button writes immediately. Reopening the same SVG reads the
+   sidecar back as long as the SVG's components still match.
+6. **Export STL set…** — pick an output directory; the app invokes
+   OpenSCAD (path from Files & Folders) once per enabled body and
+   writes one `.stl` per body plus a `print-guide.txt`. Each file goes
+   into `<svg-stem>-stl-set/` inside the directory you chose.
+7. **Export 3MF…** — pick a save path; the app renders each enabled
+   body and packs the meshes into a single generic `.3mf` with
+   per-object color metadata. Imports into PrusaSlicer / Bambu Studio /
+   Orca / Cura.
+
+### Caveats
+
+- Export blocks the UI while OpenSCAD runs (one body at a time, ~30 s
+  each on a typical machine for a complex pad). The status stamp shows
+  "rendering N/M bodies — UI will freeze briefly" so you know the
+  freeze is intentional. The buttons re-enable when rendering
+  completes.
+- Holes in the canvas preview are approximated as white overlays —
+  tkinter polygons can't render real polygon holes. The underlying
+  geometry knows the true shape; the export and STL render are
+  correct.
+- The sidecar load only restores prior edits if the component count +
+  ids match the freshly-parsed SVG. If you re-save the SVG with
+  different geometry, the editor logs a warning and falls back to
+  default one-body-per-component grouping.
 
 ## Cache system
 
@@ -166,8 +229,10 @@ an older checkout.
 
 ## Running the calculator standalone
 
-`pyramid_position_calculator.py` is a usable script on its own — edit the
-constants at the bottom of `main()` and run:
+The geometry pipeline lives in the [`stomppad/`](../stomppad/) package;
+`pyramid_position_calculator.py` at the repo root is a thin back-compat
+shim. The standalone entry point still works via the shim — edit the
+constants at the bottom of `main()` in `stomppad/__init__.py` and run:
 
 ```sh
 python pyramid_position_calculator.py
@@ -176,6 +241,14 @@ python pyramid_position_calculator.py
 Outputs `stomp_pad_precalculated.scad` and a `debug_viz.png` showing the
 boundary, skeleton, and pyramid placements. Useful for quick experiments
 without the GUI in the way.
+
+The shim is for legacy callers (this standalone path + any pre-v2 user
+scripts that wrote `import pyramid_position_calculator`). New code
+should import directly from `stomppad`:
+
+```python
+from stomppad import parse_svg_to_components, ShapeProject, BodyOutputCache
+```
 
 ## See also
 

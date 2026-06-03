@@ -100,6 +100,10 @@ unblocks every later phase. Small and mechanical.
   standalone `main()` keep working).
 - `web/scripts/prepare.js`: zip `stomppad/` → `public/stomppad.zip`; `main.js`
   unpacks it into Pyodide's FS and imports the package. (~15 lines; no new dep.)
+  *(Shipped as a JSON manifest, not a real zip — Node has no built-in zip
+  writer and the "no new dep" constraint took precedence over the wire
+  format. The contract is the same: one HTTP fetch, multi-file sync,
+  Pyodide-side unpack into the virtual FS. See `docs/architecture.md`.)*
 - Desktop import path updated; `bulk_processor.spec` datas updated so frozen
   binaries include the package.
 - No behavior change. **Regression guard:** there is no test harness in the repo

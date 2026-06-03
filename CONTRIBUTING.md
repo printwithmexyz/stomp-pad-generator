@@ -26,7 +26,8 @@ python bulk_processor_gui.py
 ```
 
 You'll need [OpenSCAD](https://openscad.org/downloads.html) installed if
-your change touches the STL render path. Full walkthrough:
+your change touches the STL render path (batch tab) or the Edit tab's
+Export STL set / Export 3MF buttons. Full walkthrough:
 [docs/desktop.md](docs/desktop.md).
 
 ### Web (Vite + Pyodide + openscad-wasm)
@@ -37,29 +38,62 @@ npm install
 npm run dev
 ```
 
-`npm install` runs `scripts/prepare.js` which copies the parent's
-`pyramid_position_calculator.py` into `public/` and downloads the
-openscad-wasm release files (~8 MB, cached on disk). The web README has
-deploy notes: [web/README.md](web/README.md).
+`npm install` runs `scripts/prepare.js` which walks the parent
+[`stomppad/`](stomppad/) package, writes
+`public/stomppad-manifest.json` (the manifest Pyodide unpacks into its
+virtual FS at boot), and downloads the openscad-wasm release files
+(~8 MB, cached on disk). The web README has deploy notes:
+[web/README.md](web/README.md).
+
+### Tests
+
+```sh
+pip install -r requirements-dev.txt   # adds pytest + pinned numpy/scikit/shapely
+pytest tests/
+```
+
+Four test files: `test_regression.py` (Phase 0 byte-equality golden),
+`test_phase1.py` (component parser, packing, patterns, ShapeProject),
+`test_phase2.py` (stateful editor API + sidecar + cache), `test_phase3.py`
+(multi-body SCAD, STL set, 3MF). The byte-equality test depends on pinned
+numpy / scikit-image / shapely versions — minor-version drift in any of
+those flips the captured `.scad`. If you intentionally bump a pin,
+recapture the golden via `python tests/fixtures/_capture_golden.py` and
+review the diff before committing.
 
 ## Where to make a change
 
-The geometry pipeline is a single Python module:
-**`pyramid_position_calculator.py`**. Both the desktop GUI and the browser
-import it directly — there is no parallel implementation to keep in sync.
-If you fix a bug or change behavior here, both interfaces benefit
-immediately. The web project re-syncs the file on every `npm run dev` /
-`npm run build`, so no manual copying.
+The geometry + editor + export pipeline lives in the
+[`stomppad/`](stomppad/) package. Submodule layout (matches
+[docs/architecture.md](docs/architecture.md)):
+
+| Module | What lives here |
+|---|---|
+| `geometry.py` | `parse_svg_to_components`, `Component`, nesting + background drop |
+| `packing.py` | skeleton, footprint, `pack_component`, `PackContext` |
+| `patterns/` | `PatternStrategy` registry + 4 built-in strategies |
+| `project.py` | `Body`, `ShapeProject`, stateful editor API, sidecar I/O |
+| `cache.py` | `BodyOutputCache` (per-body re-pack) |
+| `openscad.py` | legacy single-shape SCAD + multi-body `generate_body_scad` |
+| `exporters/` | `build_stl_set`, `write_stl_set`, `build_threemf` |
+
+Both the desktop GUI (`bulk_processor_gui.py` + `desktop_editor.py`) and
+the web frontend (`web/src/editor.js`) import from `stomppad`. The
+top-level `pyramid_position_calculator.py` is a back-compat shim — new
+code should target `stomppad` directly. The web build re-syncs the
+package on every `npm run dev` / `npm run build`, so no manual copying.
 
 When changing a function signature, audit both call sites:
 
 ```sh
-grep -n "function_name" bulk_processor_gui.py web/src/main.js
+grep -rn "function_name" stomppad/ desktop_editor.py bulk_processor_gui.py \
+     web/src/ tests/
 ```
 
 For deeper context on how the pieces fit together (logger callbacks,
-desktop process pool + STL queue, web Pyodide ↔ JS interop, openscad-wasm
-loader gotcha), read [docs/architecture.md](docs/architecture.md).
+desktop process pool + STL queue, web Pyodide ↔ JS interop, observer
+events, openscad-wasm loader gotcha), read
+[docs/architecture.md](docs/architecture.md).
 
 ## Branches and PRs
 
@@ -82,19 +116,6 @@ loader gotcha), read [docs/architecture.md](docs/architecture.md).
 - Don't add dependencies without flagging them in the PR description.
   Specifically for the web subproject: anything bundled (in `dependencies`)
   ships to every visitor, so think hard before adding.
-
-## Testing
-
-There's no formal test suite (yet). For now:
-
-- For Python changes, run the desktop GUI against a small folder of SVGs
-  and compare the generated `.scad` and `.stl` against a known-good run.
-- For web changes, exercise the upload → process → preview → download flow
-  in `npm run dev`. Try multi-file uploads and an SVG that produces a
-  `MultiPolygon` (logo with multiple disjoint shapes) to catch regressions
-  in the geometry pipeline.
-
-If you add a test suite, prefer `pytest` for Python and Vitest for the web.
 
 ## License
 

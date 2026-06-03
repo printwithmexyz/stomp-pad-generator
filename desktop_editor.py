@@ -216,6 +216,14 @@ class EditTab:
         else:
             self._project = ShapeProject.default_from_components(components, svg_info)
             self._log(f"[editor] {svg_path.name}: {len(components)} components")
+        # The previous project (now unreferenced from self._project) carried
+        # two listeners: the prior cache's _on_project_change and this
+        # EditTab's _on_project_change. off_change above removed the
+        # EditTab callback; the prior cache callback dies with the prior
+        # project when Python GC reclaims the listener list. Correctness
+        # depends on no external reference keeping the old project alive
+        # past this swap — don't stash project references in long-lived
+        # collections.
         self._cache = BodyOutputCache(self._project)
         self._project.on_change(self._on_project_change)
         self._svg_path = svg_path
@@ -227,8 +235,14 @@ class EditTab:
     def _save_now(self) -> None:
         if self._project is None or self._svg_path is None:
             return
-        sidecar = self._project.save_sidecar(self._svg_path)
-        self._stamp_var.set(f"{self._svg_path.name}  •  saved {sidecar.name}")
+        sidecar = self._project.save_sidecar(self._svg_path, logger=self._log)
+        if sidecar is None:
+            # PermissionError path — sidecar was locked (slicer holding it
+            # open on Windows is the common case). Surface that, don't
+            # crash, retry will fire on the next auto-save tick.
+            self._stamp_var.set(f"{self._svg_path.name}  •  save deferred (locked)")
+        else:
+            self._stamp_var.set(f"{self._svg_path.name}  •  saved {sidecar.name}")
 
     def _on_autosave_toggle(self) -> None:
         if not self._autosave_var.get() and self._autosave_after_id:

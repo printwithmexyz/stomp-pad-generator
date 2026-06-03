@@ -220,6 +220,17 @@ def _editor_pattern_names():
       root.sidebar.appendChild(actions);
     }
 
+    // SAFETY: pythonExpr is built via template literals at the call sites
+    // (renderSidebar). The interpolated values are all type-coerced to safe
+    // Python literals: body.id is an int from to_editor_dict; color values
+    // come from <input type=color> (browser-constrained to #rrggbb); pattern
+    // values come from a <select> populated from Python; the size override
+    // is run through Number() before interpolation; enable.checked is mapped
+    // to literal 'True'/'False'. ANY new string-valued interpolation here
+    // must either be sanitized or routed through pyodide.globals.set so the
+    // value never appears in raw Python source — otherwise a body name (or
+    // similar future input) containing a quote/newline becomes Python
+    // syntax injection.
     async function mutate(pythonExpr) {
       try {
         await pyodide.runPythonAsync(pythonExpr);

@@ -125,12 +125,29 @@ def test_generate_body_scad_with_holes_emits_paths_form(tmp_path):
     )
     # The polygon(paths=) form is one primitive with a path per ring; for
     # a donut (exterior + 1 hole) the paths list has two entries.
-    import re
-    matches = re.findall(r"paths=\[(\[[^\]]+\](?:\s*,\s*\[[^\]]+\])*)\]", scad)
-    assert matches, "polygon() with paths= not found"
-    # At least one polygon should have 2+ rings (exterior + hole).
-    assert any(p.count("[") >= 2 for p in matches), (
-        "polygon with holes should declare two rings in paths="
+    # Substring check on the literal "paths=[[" prefix sidesteps the
+    # earlier regex's nested-bracket bug — `[^\]]+` stops at the first
+    # `]`, so the previous match was structurally wrong but passed by
+    # accident on the SCAD's current spacing.
+    assert "paths=[[" in scad, "polygon() with paths= prefix not found"
+    # Count the comma-separated ring openings inside the first `paths=[`
+    # to confirm there are at least 2 rings (exterior + hole).
+    paths_start = scad.index("paths=[") + len("paths=[")
+    depth = 1
+    end = paths_start
+    for i, ch in enumerate(scad[paths_start:], start=paths_start):
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    inside = scad[paths_start:end]
+    ring_count = inside.count("[")
+    assert ring_count >= 2, (
+        f"donut polygon should declare 2+ rings in paths=; got {ring_count} "
+        f"(inside={inside!r})"
     )
 
 

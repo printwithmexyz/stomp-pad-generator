@@ -608,7 +608,7 @@ class ShapeProject:
         svg_path = Path(svg_path)
         return svg_path.with_name(svg_path.stem + SIDECAR_SUFFIX)
 
-    def save_sidecar(self, svg_path) -> Path:
+    def save_sidecar(self, svg_path, logger=None) -> Optional[Path]:
         """Write this project to ``foo.project.json`` next to ``svg_path``.
 
         Atomic: writes to a sibling ``.tmp`` and then ``replace()``s into
@@ -617,11 +617,25 @@ class ShapeProject:
         crash, but far safer than an in-place truncate-and-rewrite). The
         Phase 2 auto-save loop fires every 500 ms, so the corruption
         window for the in-place pattern was wide.
+
+        On Windows ``Path.replace`` raises ``PermissionError`` when the
+        destination is currently open in another process (a slicer holding
+        the sidecar, for instance). Auto-save would otherwise crash the
+        editor every tick. We catch + log + skip, leaving the temp file
+        in place for the next tick to retry; the caller gets ``None``.
         """
         sidecar = self.sidecar_path_for(svg_path)
         tmp = sidecar.with_name(sidecar.name + ".tmp")
-        tmp.write_text(self.to_json(), encoding="utf-8")
-        tmp.replace(sidecar)
+        try:
+            tmp.write_text(self.to_json(), encoding="utf-8")
+            tmp.replace(sidecar)
+        except PermissionError as exc:
+            if logger is not None:
+                logger(
+                    f"save_sidecar: skipped — {sidecar.name} is locked "
+                    f"({exc}). Retry on next auto-save tick."
+                )
+            return None
         return sidecar
 
     @classmethod
