@@ -28,6 +28,10 @@ a = Analysis(
         'scipy.spatial',
         'PIL.Image',
         'PIL.ImageTk',
+        # Phase 2.3 Edit tab. The import is lazy + try-except guarded in
+        # bulk_processor_gui.setup_edit_tab, so PyInstaller's static
+        # analyzer doesn't pick it up — declare it explicitly.
+        'desktop_editor',
         *stomppad_hiddenimports,
     ],
     hookspath=[],

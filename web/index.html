@@ -102,6 +102,31 @@
         <div id="results" class="results"></div>
       </section>
 
+      <section class="editor-section" id="editor-section">
+        <h2>4. Single-file editor</h2>
+        <p class="editor-help">
+          Pick one SVG to refine: click a component to select it, shift-click
+          to multi-select, then group, change a body's color, swap its pattern,
+          or set a per-body pyramid size override. The preview re-packs only
+          the bodies you change.
+        </p>
+        <div class="editor-controls">
+          <label class="editor-file-picker">
+            <input type="file" id="editor-file-input" accept=".svg" hidden />
+            <span>Choose SVG…</span>
+          </label>
+          <label class="checkbox" title="When on, the project JSON is prepared on every edit. Toggle off to skip the silent prepare and only export via the Download button.">
+            <input type="checkbox" id="editor-autosave-toggle" checked /> Auto-prepare
+          </label>
+          <button id="editor-download-btn" type="button">Download .project.json</button>
+          <span id="editor-saved-stamp" class="editor-stamp"></span>
+        </div>
+        <div class="editor-layout">
+          <canvas id="editor-canvas" class="editor-canvas"></canvas>
+          <aside id="editor-sidebar" class="editor-sidebar"></aside>
+        </div>
+      </section>
+
       <section class="console-section">
         <h2>Console</h2>
         <pre id="console" class="console"></pre>

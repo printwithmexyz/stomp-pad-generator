@@ -52,6 +52,61 @@ called out in the plan). `PackContext` caches per-component skeletons so
 Phase 2's "re-pack only edited bodies" can avoid recomputing untouched
 medial axes — the slow step in Pyodide.
 
+### Editor API (Phase 2.1)
+
+Phase 2 made `ShapeProject` a state machine. Selection lives **on the
+project** (`selected_component_ids`, `selected_body_id`) — the Phase 2
+interview locked stateful over stateless so mutation sequences are
+deterministic and easier to test than threading selection through every
+call. The state is **ephemeral**: `to_dict` / sidecar JSON omits it so
+two opens of the same project always start with empty selection.
+
+Every mutation method (`select_component`, `assign_components_to_body`,
+`set_body_pattern`, `flip_hole_to_body`, …) fires a typed event through
+the observer hook (`on_change(callback)`). Events are one of:
+
+- `EVENT_SELECTION_CHANGED` — payload empty
+- `EVENT_BODY_CHANGED` — payload `{"body_ids": [...]}`
+- `EVENT_TOPOLOGY_CHANGED` — components or bodies added/removed
+- `EVENT_GLOBAL_PARAMS_CHANGED` — payload empty
+
+`stomppad.cache.BodyOutputCache` subscribes on construction and uses the
+event stream to invalidate selectively: a body color change clears one
+body's cached positions, a topology change clears everything. Selection
+events are intentionally ignored — clicking to highlight should never
+re-pack. `hit_test(x, y)` iterates components smallest-area-first so a
+depth-2 nested body (the smiley-eye case) wins over its larger ancestor.
+
+Sidecars use the `<svg-stem>.project.json` convention next to the
+source SVG. `save_sidecar(svg_path)` and `load_sidecar(svg_path)` are
+classmethods on `ShapeProject`; both frontends call them when the editor
+toggle says auto-save is on.
+
+### Editor frontends (Phase 2.2 / 2.3)
+
+Two thin renderers consume the Phase 2.1 API:
+
+- **Web** (`web/src/editor.js`) — opens one SVG at a time in section 4
+  of the index page; `web/src/preview-2d.js` exports `drawEditor` which
+  paints components colored by their body's `color_hex` (with holes cut
+  out via even-odd fill) and returns an affine transform so click
+  handlers can map pixel coords back through `project.hit_test`. The
+  right sidebar lists bodies with color swatch + enable checkbox +
+  pattern dropdown + per-body `pyramid_size` override. "Download
+  .project.json" exports the sidecar; the browser can't write next to
+  the source, so auto-prepare runs the encoding on edit but a click is
+  still required to save the file.
+- **Desktop** (`desktop_editor.py`) — `EditTab` slots into
+  `bulk_processor_gui.py`'s notebook as a fourth tab. Same model, same
+  events, native widgets: tkinter `Canvas` for the preview (holes are
+  approximated as white overlays — tkinter polygons don't support real
+  holes; the underlying `ShapeProject` knows the true geometry), color
+  chooser dialog for the swatch, `ttk.Combobox` for the pattern. Auto-
+  saves the sidecar JSON next to the SVG with a 500ms debounce; the
+  checkbox disables that loop. Loading an SVG that already has a
+  sidecar reads the prior edits instead of falling back to the default
+  one-body-per-component layout.
+
 ### Web sync (manifest, not zip)
 
 `web/scripts/prepare.js` walks the `stomppad/` directory and writes
@@ -177,8 +232,13 @@ stomppad/
 │   ├── hexagonal.py              uniform hex, no rotation
 │   ├── rectangular.py            square grid
 │   └── triangular.py             triangular lattice
-└── project.py                    Phase 1.4 — Body, ShapeProject, schema_v1
-                                  JSON contract for both frontends
+├── project.py                    Phase 1.4 + Phase 2.1 — Body, ShapeProject
+│                                 (schema_v1 JSON contract) + stateful
+│                                 selection/edit API, hit_test, sidecar I/O,
+│                                 observer events for cache invalidation
+└── cache.py                      Phase 2.1 — BodyOutputCache (memoize per
+                                  body, invalidate selectively on body/
+                                  topology/global-param events)
 pyramid_position_calculator.py    re-export shim → stomppad (back-compat)
 bulk_processor_gui.py             tkinter GUI + process pool + STL queue
 bulk_processor.spec               PyInstaller spec (used by CI)

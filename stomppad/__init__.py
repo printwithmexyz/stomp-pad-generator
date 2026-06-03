@@ -27,9 +27,15 @@ from .packing import (
 from .project import (
     Body,
     DEFAULT_PATTERN,
+    EVENT_BODY_CHANGED,
+    EVENT_GLOBAL_PARAMS_CHANGED,
+    EVENT_SELECTION_CHANGED,
+    EVENT_TOPOLOGY_CHANGED,
     SCHEMA_VERSION,
+    SIDECAR_SUFFIX,
     ShapeProject,
 )
+from .cache import BodyOutputCache
 # Side-effect import: registers the built-in pattern strategies.
 from . import patterns  # noqa: F401
 
@@ -55,6 +61,13 @@ __all__ = [
     "pack_component",
     "PackContext",
     "patterns",
+    # Phase 2.1 additions.
+    "BodyOutputCache",
+    "EVENT_BODY_CHANGED",
+    "EVENT_GLOBAL_PARAMS_CHANGED",
+    "EVENT_SELECTION_CHANGED",
+    "EVENT_TOPOLOGY_CHANGED",
+    "SIDECAR_SUFFIX",
 ]
 
 

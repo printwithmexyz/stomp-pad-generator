@@ -268,8 +268,29 @@ class BulkProcessorGUI:
         notebook.add(console_frame, text="Console")
         self.setup_console_tab(console_frame)
 
+        # Tab 4: Single-file editor (v2 Phase 2.3). Lazy-imported so the
+        # batch flow doesn't pay the import cost if the user never opens
+        # the tab — and so a desktop_editor import failure (e.g. stomppad
+        # not installed yet on an older bundle) doesn't kill the GUI.
+        edit_frame = ttk.Frame(notebook)
+        notebook.add(edit_frame, text="Edit")
+        self.setup_edit_tab(edit_frame)
+
         # Create persistent bottom bar with progress and buttons
         self.setup_bottom_bar(main_container)
+
+    def setup_edit_tab(self, parent):
+        try:
+            from desktop_editor import EditTab
+        except Exception as exc:  # noqa: BLE001
+            ttk.Label(
+                parent,
+                text=f"Editor unavailable: {exc}",
+                foreground="red",
+                wraplength=600,
+            ).pack(padx=24, pady=24)
+            return
+        self.edit_tab = EditTab(parent, log_callback=self.log)
 
     def setup_files_tab(self, parent):
         # Input folder

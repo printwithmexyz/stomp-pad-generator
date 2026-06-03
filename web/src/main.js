@@ -5,6 +5,7 @@
 import { renderStl } from './scad-renderer.js';
 import { draw2dPreview } from './preview-2d.js';
 import { mount3dPreview } from './preview-3d.js';
+import { createEditor } from './editor.js';
 
 const PYODIDE_VERSION = 'v0.26.4';
 
@@ -372,11 +373,28 @@ processBtn.addEventListener('click', async () => {
   log('\nDone.');
 });
 
+let editorInstance = null;
+
+function mountEditor() {
+  const root = {
+    canvas: document.getElementById('editor-canvas'),
+    sidebar: document.getElementById('editor-sidebar'),
+    fileInput: document.getElementById('editor-file-input'),
+    downloadBtn: document.getElementById('editor-download-btn'),
+    autosaveToggle: document.getElementById('editor-autosave-toggle'),
+    savedStamp: document.getElementById('editor-saved-stamp'),
+  };
+  if (!root.canvas || !pyodide) return;
+  editorInstance?.dispose();
+  editorInstance = createEditor({ pyodide, root, log });
+}
+
 (async () => {
   try {
     await initPyodide();
     processBtn.disabled = false;
     processBtn.textContent = 'Process all';
+    mountEditor();
   } catch (e) {
     log(`FATAL: ${e.message || e}`);
     processBtn.textContent = 'Failed to load';
