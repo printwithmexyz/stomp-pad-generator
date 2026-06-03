@@ -290,7 +290,14 @@ class BulkProcessorGUI:
                 wraplength=600,
             ).pack(padx=24, pady=24)
             return
-        self.edit_tab = EditTab(parent, log_callback=self.log)
+        # The Edit tab's STL/3MF export needs to invoke OpenSCAD. Read the
+        # path the user set in the Files & Folders tab on every export rather
+        # than capturing it once — this way config changes flow through.
+        self.edit_tab = EditTab(
+            parent,
+            log_callback=self.log,
+            openscad_path_provider=lambda: self.openscad_path.get(),
+        )
 
     def setup_files_tab(self, parent):
         # Input folder

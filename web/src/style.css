@@ -225,6 +225,13 @@ button:disabled { background: #bbb; cursor: not-allowed; }
   padding: 6px 12px;
 }
 #editor-download-btn:hover { background: #28a745; }
+.editor-export-btn {
+  background: #8b5cf6;
+  font-size: 0.85rem;
+  padding: 6px 12px;
+}
+.editor-export-btn:hover:not(:disabled) { background: #7c3aed; }
+.editor-export-btn:disabled { background: #c4b5fd; }
 
 .editor-layout {
   display: grid;

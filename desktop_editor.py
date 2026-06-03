@@ -18,19 +18,23 @@ Design contract (per v2-plan Phase 2):
 """
 from __future__ import annotations
 
+import subprocess
+import tempfile
 import tkinter as tk
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox, ttk
-from typing import Optional
+from typing import Callable, Optional
 
 from stomppad import (
     BodyOutputCache,
     EVENT_BODY_CHANGED,
     EVENT_TOPOLOGY_CHANGED,
     ShapeProject,
+    generate_per_body_scads,
     parse_svg_to_components,
     patterns,
 )
+from stomppad.exporters import build_threemf, write_stl_set
 
 
 AUTOSAVE_DELAY_MS = 500
@@ -43,9 +47,17 @@ DEFAULT_COLOR = "#888888"
 class EditTab:
     """Owns the Edit tab's UI + the editing model for one open SVG."""
 
-    def __init__(self, parent: ttk.Frame, log_callback=None) -> None:
+    def __init__(
+        self,
+        parent: ttk.Frame,
+        log_callback=None,
+        openscad_path_provider: Optional[Callable[[], str]] = None,
+    ) -> None:
         self._parent = parent
         self._log = log_callback or (lambda _msg: None)
+        # Reads the current OpenSCAD path from the host GUI on demand so
+        # changes in the Files & Folders tab propagate without re-wiring.
+        self._openscad_path_provider = openscad_path_provider or (lambda: "")
 
         self._svg_path: Optional[Path] = None
         self._project: Optional[ShapeProject] = None
@@ -83,6 +95,16 @@ class EditTab:
             variable=self._autosave_var,
             command=self._on_autosave_toggle,
         ).pack(side="left", padx=(12, 0))
+
+        # Export buttons (Phase 3.4). Disabled until a file is loaded.
+        self._export_stl_btn = ttk.Button(
+            top, text="Export STL set…", command=self._on_export_stl, state="disabled"
+        )
+        self._export_stl_btn.pack(side="left", padx=(12, 0))
+        self._export_3mf_btn = ttk.Button(
+            top, text="Export 3MF…", command=self._on_export_3mf, state="disabled"
+        )
+        self._export_3mf_btn.pack(side="left", padx=(6, 0))
 
         self._stamp_var = tk.StringVar(value="(no file open)")
         ttk.Label(top, textvariable=self._stamp_var, foreground="gray").pack(
@@ -198,6 +220,8 @@ class EditTab:
         self._project.on_change(self._on_project_change)
         self._svg_path = svg_path
         self._stamp_var.set(f"{svg_path.name}  •  unsaved")
+        self._export_stl_btn.configure(state="normal")
+        self._export_3mf_btn.configure(state="normal")
         self._render_all()
 
     def _save_now(self) -> None:
@@ -490,3 +514,112 @@ class EditTab:
             self._project.group_selected_into_new_body()
         except ValueError as exc:
             messagebox.showinfo("Group", str(exc))
+
+    # ----------------------------------------------------------------- #
+    # Phase 3.4 — STL set + 3MF export
+    # ----------------------------------------------------------------- #
+
+    def _render_enabled_bodies_to_stl(self) -> Optional[dict]:
+        """Render each enabled body via subprocess OpenSCAD. Returns
+        ``{body_id: stl_bytes}`` or ``None`` if OpenSCAD isn't configured.
+        """
+        if self._project is None or self._cache is None:
+            return None
+        openscad = self._openscad_path_provider().strip()
+        if not openscad:
+            messagebox.showerror(
+                "OpenSCAD path missing",
+                "Set the OpenSCAD executable path in the Files & Folders tab "
+                "before exporting STLs or 3MF.",
+            )
+            return None
+
+        scads = generate_per_body_scads(self._project, self._cache)
+        if not scads:
+            messagebox.showinfo("Export", "No enabled bodies to export.")
+            return None
+
+        stl_by_body: dict[int, bytes] = {}
+        with tempfile.TemporaryDirectory(prefix="stomppad-render-") as tmp:
+            tmp_dir = Path(tmp)
+            for body_id, scad in scads.items():
+                scad_path = tmp_dir / f"body_{body_id}.scad"
+                stl_path = tmp_dir / f"body_{body_id}.stl"
+                scad_path.write_text(scad, encoding="utf-8")
+                self._log(f"[editor] rendering body {body_id} via OpenSCAD…")
+                try:
+                    result = subprocess.run(
+                        [openscad, "-o", str(stl_path), str(scad_path)],
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                    )
+                except FileNotFoundError:
+                    messagebox.showerror(
+                        "OpenSCAD not found",
+                        f"Could not run {openscad!r}. Check the path in the "
+                        "Files & Folders tab.",
+                    )
+                    return None
+                except subprocess.TimeoutExpired:
+                    self._log(f"[editor] body {body_id} render timed out")
+                    continue
+                if result.returncode != 0 or not stl_path.exists():
+                    tail = (result.stderr or "")[-400:].strip()
+                    self._log(f"[editor] body {body_id} render FAILED: {tail}")
+                    continue
+                stl_by_body[body_id] = stl_path.read_bytes()
+                self._log(
+                    f"[editor] body {body_id}: {len(stl_by_body[body_id]) / 1024:.1f} KB"
+                )
+        if not stl_by_body:
+            messagebox.showerror(
+                "Export failed", "OpenSCAD produced no STLs. See Console for details."
+            )
+            return None
+        return stl_by_body
+
+    def _on_export_stl(self) -> None:
+        if self._project is None or self._svg_path is None:
+            return
+        stl_by_body = self._render_enabled_bodies_to_stl()
+        if not stl_by_body:
+            return
+        out_dir = filedialog.askdirectory(
+            title="Choose output folder for STL set",
+            initialdir=str(self._svg_path.parent),
+        )
+        if not out_dir:
+            return
+        target = Path(out_dir) / f"{self._svg_path.stem}-stl-set"
+        try:
+            paths = write_stl_set(self._project, stl_by_body, target)
+        except OSError as exc:
+            messagebox.showerror("Write failed", str(exc))
+            return
+        self._log(f"[editor] wrote {len(paths)} files to {target}")
+        self._stamp_var.set(f"STL set → {target.name}/")
+
+    def _on_export_3mf(self) -> None:
+        if self._project is None or self._svg_path is None:
+            return
+        stl_by_body = self._render_enabled_bodies_to_stl()
+        if not stl_by_body:
+            return
+        target = filedialog.asksaveasfilename(
+            title="Save 3MF",
+            initialdir=str(self._svg_path.parent),
+            initialfile=f"{self._svg_path.stem}.3mf",
+            defaultextension=".3mf",
+            filetypes=[("3MF", "*.3mf"), ("All files", "*.*")],
+        )
+        if not target:
+            return
+        try:
+            blob = build_threemf(self._project, stl_by_body)
+        except ValueError as exc:
+            messagebox.showerror("Export failed", str(exc))
+            return
+        Path(target).write_bytes(blob)
+        self._log(f"[editor] wrote {target} ({len(blob) / 1024:.1f} KB)")
+        self._stamp_var.set(f"3MF → {Path(target).name}")

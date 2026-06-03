@@ -94,14 +94,19 @@ function describeOpenscadError(thrown, instance) {
   return String(thrown);
 }
 
-export async function renderStl(scadText, svgFilename, svgText) {
+export async function renderStl(scadText, svgFilename = null, svgText = null) {
+  // svgFilename/svgText are only needed for the legacy single-shape SCAD which
+  // does `import("foo.svg")`. The Phase 3 per-body SCADs inline geometry via
+  // polygon() and don't need either; callers pass null to skip the SVG write.
   const instance = await getInstance();
 
   clearWorkingFiles(instance);
   stdoutLines.length = 0;
   stderrLines.length = 0;
 
-  instance.FS.writeFile(`/${svgFilename}`, svgText);
+  if (svgFilename && svgText) {
+    instance.FS.writeFile(`/${svgFilename}`, svgText);
+  }
   instance.FS.writeFile('/input.scad', scadText);
 
   try {

@@ -383,6 +383,8 @@ function mountEditor() {
     downloadBtn: document.getElementById('editor-download-btn'),
     autosaveToggle: document.getElementById('editor-autosave-toggle'),
     savedStamp: document.getElementById('editor-saved-stamp'),
+    exportStlBtn: document.getElementById('editor-export-stl-btn'),
+    export3mfBtn: document.getElementById('editor-export-3mf-btn'),
   };
   if (!root.canvas || !pyodide) return;
   editorInstance?.dispose();

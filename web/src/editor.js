@@ -9,6 +9,8 @@
 // Python side, stateful selection in the model).
 
 import { drawEditor } from './preview-2d.js';
+import { renderStl } from './scad-renderer.js';
+import { buildZip } from './zip.js';
 
 const PATTERN_OPTIONS = ['skeleton', 'hexagonal', 'rectangular', 'triangular'];
 
@@ -33,6 +35,7 @@ from stomppad import (
     parse_svg_to_components,
     ShapeProject,
     BodyOutputCache,
+    generate_per_body_scads,
     patterns as _patterns,
 )
 
@@ -243,17 +246,102 @@ def _editor_pattern_names():
     handlers.save = async () => {
       const json = await pyodide.runPythonAsync('_editor_project.to_json()');
       const blob = new Blob([json], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = file.name.replace(/\.svg$/i, '') + '.project.json';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      triggerDownload(blob, file.name.replace(/\.svg$/i, '') + '.project.json');
       root.savedStamp.textContent = `downloaded ${new Date().toLocaleTimeString()}`;
     };
     root.downloadBtn.addEventListener('click', handlers.save);
+
+    async function renderEnabledBodies() {
+      // Build {body_id: scad_text} on the Python side, then iterate in JS
+      // because openscad-wasm calls have to be sequential (one shared WASM
+      // instance with stateful FS).
+      pyodide.runPython('_editor_per_body_scads = generate_per_body_scads(_editor_project, _editor_cache)');
+      const scadProxy = pyodide.globals.get('_editor_per_body_scads');
+      const scadByBody = scadProxy.toJs({ dict_converter: Object.fromEntries });
+      scadProxy.destroy?.();
+      const stlByBody = {};
+      for (const [bidStr, scad] of Object.entries(scadByBody)) {
+        const bid = Number(bidStr);
+        log(`[editor] rendering body ${bid}…`);
+        const t0 = performance.now();
+        try {
+          stlByBody[bid] = await renderStl(scad);
+          log(`[editor] body ${bid}: ${(stlByBody[bid].length / 1024).toFixed(1)} KB in ${(performance.now() - t0).toFixed(0)}ms`);
+        } catch (e) {
+          log(`[editor] body ${bid} FAILED: ${e.message || e}`);
+        }
+      }
+      return stlByBody;
+    }
+
+    function buildPythonStlDict(stlByBody) {
+      // Hand a Python dict {int: bytes} to the exporters. Pyodide's
+      // toPy automatically converts Uint8Array → bytes.
+      const py = pyodide.toPy(stlByBody);
+      pyodide.globals.set('_editor_stl_by_body', py);
+      return py;
+    }
+
+    handlers.exportStl = async () => {
+      const stlByBody = await renderEnabledBodies();
+      if (Object.keys(stlByBody).length === 0) {
+        log('[editor] nothing to export (no enabled bodies)');
+        return;
+      }
+      const pyDict = buildPythonStlDict(stlByBody);
+      try {
+        pyodide.runPython(
+          'from stomppad.exporters import build_stl_set\n'
+          + '_editor_stl_bundle = build_stl_set(_editor_project, _editor_stl_by_body)'
+        );
+        const bundleProxy = pyodide.globals.get('_editor_stl_bundle');
+        const bundle = bundleProxy.toJs({ dict_converter: Object.fromEntries });
+        bundleProxy.destroy?.();
+        // Convert each {filename: bytes} entry to a Uint8Array (Pyodide
+        // returns bytes as Uint8Array already; strings stay as strings).
+        const zipEntries = {};
+        for (const [name, content] of Object.entries(bundle)) {
+          zipEntries[name] = content;
+        }
+        const zipBytes = buildZip(zipEntries);
+        triggerDownload(
+          new Blob([zipBytes], { type: 'application/zip' }),
+          file.name.replace(/\.svg$/i, '') + '-stl-set.zip'
+        );
+        root.savedStamp.textContent = `STL set: ${Object.keys(stlByBody).length} bodies`;
+      } finally {
+        pyDict.destroy?.();
+      }
+    };
+    root.exportStlBtn.addEventListener('click', handlers.exportStl);
+
+    handlers.export3mf = async () => {
+      const stlByBody = await renderEnabledBodies();
+      if (Object.keys(stlByBody).length === 0) {
+        log('[editor] nothing to export (no enabled bodies)');
+        return;
+      }
+      const pyDict = buildPythonStlDict(stlByBody);
+      try {
+        pyodide.runPython(
+          'from stomppad.exporters import build_threemf\n'
+          + '_editor_threemf_bytes = build_threemf(_editor_project, _editor_stl_by_body)'
+        );
+        const blobProxy = pyodide.globals.get('_editor_threemf_bytes');
+        const bytes = blobProxy.toJs();
+        blobProxy.destroy?.();
+        triggerDownload(
+          new Blob([bytes], { type: 'model/3mf' }),
+          file.name.replace(/\.svg$/i, '') + '.3mf'
+        );
+        root.savedStamp.textContent = `3MF: ${Object.keys(stlByBody).length} bodies`;
+      } catch (e) {
+        log(`[editor] 3MF export failed: ${e.message || e}`);
+      } finally {
+        pyDict.destroy?.();
+      }
+    };
+    root.export3mfBtn.addEventListener('click', handlers.export3mf);
 
     handlers.toggle = () => {
       if (root.autosaveToggle.checked) {
@@ -271,12 +359,25 @@ def _editor_pattern_names():
         root.canvas.removeEventListener('click', handlers.click);
         root.downloadBtn.removeEventListener('click', handlers.save);
         root.autosaveToggle.removeEventListener('change', handlers.toggle);
+        root.exportStlBtn.removeEventListener('click', handlers.exportStl);
+        root.export3mfBtn.removeEventListener('click', handlers.export3mf);
         clearTimeout(autosaveTimer);
         root.sidebar.innerHTML = '';
         const ctx = root.canvas.getContext('2d');
         ctx.clearRect(0, 0, root.canvas.width, root.canvas.height);
       },
     };
+  }
+
+  function triggerDownload(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
 
   function renderEmpty(message = 'Pick an SVG to edit.') {

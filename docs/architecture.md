@@ -107,6 +107,34 @@ Two thin renderers consume the Phase 2.1 API:
   sidecar reads the prior edits instead of falling back to the default
   one-body-per-component layout.
 
+### Multicolor export (Phase 3)
+
+Two output paths, both built from per-body SCADs:
+
+- **STL set** — one `.stl` per enabled body plus a `print-guide.txt`
+  mapping body name → color → filename. Easiest to import into any
+  slicer (no extension support needed). The web frontend bundles the
+  set into a hand-rolled STORE-method zip (`web/src/zip.js`) so the
+  user gets one download; the desktop writes the files directly to a
+  user-chosen folder via `stomppad.exporters.stl_set.write_stl_set`.
+- **Generic 3MF** — one `.3mf` containing all enabled bodies as
+  separate `<object>`s with per-body color encoded as
+  `basematerials/displaycolor`. Single download / single file.
+
+Per-body SCADs use `polygon(points=…)` for each component (with
+`difference()` for holes) rather than `import(svg_file)` so each
+body's geometry is self-contained — important for user-defined body
+groupings that don't correspond to a single SVG element.
+
+Rendering SCAD → STL happens at the frontend boundary (subprocess
+OpenSCAD on desktop, `openscad-wasm` in the browser), keeping
+`stomppad.exporters` portable across runtimes. The 3MF builder parses
+STL → mesh (`_parse_stl_binary` with vertex dedup) → 3MF XML →
+zip-with-three-required-files. The v2 plan flags that "imports into any
+modern slicer" is unproven by the schema check alone — slicer color
+support varies, so a manual PrusaSlicer round-trip should gate any
+release that promises 3MF color fidelity.
+
 ### Web sync (manifest, not zip)
 
 `web/scripts/prepare.js` walks the `stomppad/` directory and writes
@@ -236,9 +264,22 @@ stomppad/
 │                                 (schema_v1 JSON contract) + stateful
 │                                 selection/edit API, hit_test, sidecar I/O,
 │                                 observer events for cache invalidation
-└── cache.py                      Phase 2.1 — BodyOutputCache (memoize per
-                                  body, invalidate selectively on body/
-                                  topology/global-param events)
+├── cache.py                      Phase 2.1 — BodyOutputCache (memoize per
+│                                 body, invalidate selectively on body/
+│                                 topology/global-param events)
+├── openscad.py                   Phase 3.1 — single-shape legacy SCAD
+│                                 (preserved verbatim for the Phase 0
+│                                 regression fixture) + multi-body
+│                                 generate_body_scad inlining each body's
+│                                 geometry as polygon() / difference()
+└── exporters/                    Phase 3.2 + 3.3
+    ├── __init__.py
+    ├── stl_set.py                build_stl_set / write_stl_set — bundles
+    │                             per-body STLs + print-guide.txt
+    └── threemf.py                build_threemf — hand-rolled zip with
+                                  [Content_Types] + .rels + 3dmodel.model;
+                                  per-body <object> with basematerials
+                                  displaycolor from body.color_hex
 pyramid_position_calculator.py    re-export shim → stomppad (back-compat)
 bulk_processor_gui.py             tkinter GUI + process pool + STL queue
 bulk_processor.spec               PyInstaller spec (used by CI)
