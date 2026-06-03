@@ -231,13 +231,22 @@ def py_logger(msg):
     js_log(msg)
 
 p = js_params
-polygon, svg_info = parse_svg_to_polygon(
+_parsed = parse_svg_to_polygon(
     '/input.svg',
     target_width=p['target_width'],
     target_height=p['target_height'] if p['target_height'] > 0 else None,
     samples_per_segment=p['samples_per_segment'],
     logger=py_logger,
 )
+if _parsed is None:
+    # parse_svg_to_polygon already logged the specifics via py_logger
+    # (malformed XML location, no parseable shapes, etc.). Raise here so
+    # the JS-side catch reports a clean "ERROR processing <file>" line
+    # instead of a TypeError on tuple unpacking.
+    raise ValueError(
+        f"could not parse {js_filename} — see log above for details"
+    )
+polygon, svg_info = _parsed
 `);
 
   await pyodide.runPythonAsync(`

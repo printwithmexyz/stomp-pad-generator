@@ -255,6 +255,30 @@ def test_parse_svg_to_components_returns_none_on_no_shapes(tmp_path):
     assert parse_svg_to_components(str(svg), target_width=80) is None
 
 
+def test_parse_svg_to_components_returns_none_on_malformed_xml(tmp_path):
+    """A real-world Adobe Illustrator SVG with `--` inside a comment is
+    rejected by xml.etree as malformed; before this guard the caller
+    saw a raw ParseError traceback instead of a None return + a
+    user-actionable logger message pointing at the offending column."""
+    svg = _write_svg(
+        tmp_path,
+        "broken.svg",
+        # `--` inside `<!-- … -->` is forbidden by the XML spec and is
+        # exactly what older Adobe Illustrator builds shipped in the
+        # Generator comment.
+        '<?xml version="1.0"?>'
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">'
+        '<!-- Generator -- bad --><rect x="0" y="0" width="10" height="10"/>'
+        '</svg>',
+    )
+    messages: list[str] = []
+    assert parse_svg_to_components(str(svg), logger=messages.append) is None
+    joined = "\n".join(messages)
+    assert "not well-formed" in joined.lower()
+    # The diagnostic should point the user at a specific line + column.
+    assert "line" in joined.lower() and "col" in joined.lower()
+
+
 def test_component_from_dict_round_trips_holes_and_fill(tmp_path):
     """The Phase 1 ShapeProject round-trip test only checks the project
     surface; a hole silently dropped during Component.from_dict would

@@ -42,6 +42,54 @@ def _log(logger, message):
     (logger or print)(message)
 
 
+def _explain_xml_parse_error(svg_file, exc) -> str:
+    """Render a multi-line diagnostic for an XML ParseError: the source
+    line where the parser tripped, with a caret marking the column.
+
+    Adobe Illustrator and similar tools regularly emit SVGs whose first
+    line is a single 200+ char run (XML declaration + DOCTYPE +
+    Generator comment + root element). When the parser raises
+    ``not well-formed (invalid token): line 1, column 54``, the user has
+    no easy way to see what's actually at column 54. This dumps the
+    relevant slice so they can read it.
+
+    Common culprits to look for in the dumped slice:
+      - ``--`` inside an XML comment (forbidden by spec; Adobe ships
+        these in older versions)
+      - HTML entities like ``&middot;`` or ``&nbsp;`` that aren't
+        defined in XML
+      - Unescaped ``&`` in attribute values
+      - Stray non-XML bytes (BOM mid-file, control characters)
+    """
+    line_no, col_no = getattr(exc, "position", (None, None))
+    try:
+        with open(svg_file, "rb") as f:
+            raw = f.read()
+    except OSError as read_exc:
+        return f"  (could not re-read {svg_file!r} for diagnostic: {read_exc})"
+    text = raw.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if not lines or not isinstance(line_no, int) or line_no < 1 or line_no > len(lines):
+        # Fall back to the file head.
+        head = text[:200].replace("\n", "\\n")
+        return f"  file head (first 200 chars): {head!r}"
+    bad_line = lines[line_no - 1]
+    # Window the offending column so even a single-line giant file is
+    # readable: ±40 chars around the reported position.
+    if isinstance(col_no, int) and col_no >= 0:
+        start = max(0, col_no - 40)
+        end = min(len(bad_line), col_no + 40)
+        slice_ = bad_line[start:end]
+        caret_offset = col_no - start
+        caret = " " * caret_offset + "^"
+        return (
+            f"  near line {line_no}, col {col_no} (showing chars {start}..{end}):\n"
+            f"    {slice_}\n"
+            f"    {caret}"
+        )
+    return f"  line {line_no}: {bad_line[:200]!r}"
+
+
 @dataclass
 class Component:
     """One SVG component: an exterior ring plus optional interior holes.
@@ -283,9 +331,17 @@ def parse_svg_to_components(
     only as a log line — Phase 2's editor will be able to re-add them.
 
     Returns ``None`` if the SVG had no parseable rings (mirrors the legacy
-    error path so the desktop GUI's existing checks keep working).
+    error path so the desktop GUI's existing checks keep working) or if
+    the file is not well-formed XML — in the latter case the logger gets
+    the parse-error location plus a short hex+text preview of the bytes
+    near the offending column so the caller can diagnose what's wrong.
     """
-    tree = ET.parse(svg_file)
+    try:
+        tree = ET.parse(svg_file)
+    except ET.ParseError as exc:
+        _log(logger, f"ERROR: SVG is not well-formed XML: {exc}")
+        _log(logger, _explain_xml_parse_error(svg_file, exc))
+        return None
     root = tree.getroot()
 
     viewBox = root.get("viewBox")
