@@ -114,7 +114,7 @@ function svgFromState(state) {
  * so the caller can convert canvas pixel clicks into SVG coords for
  * hit_test(). All drawing happens on the supplied canvas.
  */
-export function drawEditor(canvas, state, { pyramidSize = 4 } = {}) {
+export function drawEditor(canvas, state) {
   const ctx = canvas.getContext('2d');
   const dpr = window.devicePixelRatio || 1;
   const cssW = canvas.clientWidth;

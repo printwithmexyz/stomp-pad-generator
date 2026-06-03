@@ -609,9 +609,19 @@ class ShapeProject:
         return svg_path.with_name(svg_path.stem + SIDECAR_SUFFIX)
 
     def save_sidecar(self, svg_path) -> Path:
-        """Write this project to ``foo.project.json`` next to ``svg_path``."""
+        """Write this project to ``foo.project.json`` next to ``svg_path``.
+
+        Atomic: writes to a sibling ``.tmp`` and then ``replace()``s into
+        position. POSIX gives a real atomic rename; on Windows NTFS the
+        rename is transactional in the common case (not strictly atomic on
+        crash, but far safer than an in-place truncate-and-rewrite). The
+        Phase 2 auto-save loop fires every 500 ms, so the corruption
+        window for the in-place pattern was wide.
+        """
         sidecar = self.sidecar_path_for(svg_path)
-        sidecar.write_text(self.to_json(), encoding="utf-8")
+        tmp = sidecar.with_name(sidecar.name + ".tmp")
+        tmp.write_text(self.to_json(), encoding="utf-8")
+        tmp.replace(sidecar)
         return sidecar
 
     @classmethod

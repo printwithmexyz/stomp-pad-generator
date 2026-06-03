@@ -29,12 +29,16 @@ keep working unchanged for existing callers and the standalone `main()`.
 
 Phase 1.1 split SVG parsing out into `stomppad.geometry`. Each path
 subpath / rect / polygon / circle / ellipse becomes its own ring, even-odd
-nesting decides which rings are holes vs. nested bodies, and a heuristic
-(>=95% viewBox coverage AND bbox-fill >=0.999) drops near-full-canvas
-rectangular backgrounds. The original `parse_svg_to_polygon` is now a
-thin shim over `parse_svg_to_components` + `unary_union` so existing
-single-polygon callers (the desktop packer, the web preview) keep
-working. Phase 1.5's test suite is where the multi-ring assertions land.
+nesting decides which rings are holes vs. nested bodies, and the
+background auto-drop heuristic requires **both** high viewBox coverage
+(default ≥95%) **and** a high bounding-box fill ratio (default ≥0.999) —
+the bbox-fill check is the "near-perfect axis-aligned rectangle" test
+the v2 plan calls for, since a real rectangle's area equals its bbox
+area exactly while a blob's is strictly less. The original
+`parse_svg_to_polygon` is now a thin shim over `parse_svg_to_components`
++ `unary_union` so existing single-polygon callers (the desktop packer,
+the web preview) keep working. Phase 1.5's test suite is where the
+multi-ring assertions land.
 
 Phase 1.4 added `stomppad.project` — the `ShapeProject` dataclass that
 both frontends will round-trip through in Phase 2. Schema is versioned

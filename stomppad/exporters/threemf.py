@@ -66,22 +66,24 @@ def _parse_stl_binary(data: bytes) -> tuple[list[tuple[float, float, float]], li
     vertices deduplicated by exact coordinate match. Triangle indices
     reference into the vertex list.
 
-    ASCII STL is rejected — OpenSCAD emits binary by default and the
-    callers in this project all use the default. Add an ASCII path only
-    when a real user file demands it.
+    Detection is **structural**, not header-sniffing: a binary STL's
+    payload size is exactly ``84 + triangle_count * 50``. The earlier
+    ``b"facet" in data[:512]`` ASCII heuristic false-positived on any
+    binary STL whose 80-byte junk header happened to contain the byte
+    sequence for "facet" — which happens often enough on real
+    openscad-wasm output to matter. The size check is unambiguous.
     """
     if len(data) < 84:
         raise ValueError(f"STL too short ({len(data)} bytes); not a binary STL")
-    if data[:5] == b"solid" and b"facet" in data[:512]:
-        # Heuristic: a binary STL's 80-byte header *can* start with "solid"
-        # too, but a binary file never contains "facet" in the header. If
-        # both conditions hit, this is an ASCII STL we can't parse.
-        raise ValueError("ASCII STL is not supported — re-export as binary")
     triangle_count = struct.unpack_from("<I", data, 80)[0]
     expected = 84 + triangle_count * 50
-    if len(data) < expected:
+    if len(data) != expected:
+        # Doesn't match the binary layout. If it also starts with "solid",
+        # it's almost certainly an ASCII STL — give a targeted error.
+        if data[:5] == b"solid":
+            raise ValueError("ASCII STL is not supported — re-export as binary")
         raise ValueError(
-            f"STL truncated: claims {triangle_count} triangles "
+            f"STL malformed: claims {triangle_count} triangles "
             f"(expected {expected} bytes, got {len(data)})"
         )
 
@@ -175,12 +177,17 @@ def _build_3dmodel_xml(project: ShapeProject, body_meshes: list[tuple[Body, list
 def build_threemf(
     project: ShapeProject,
     stl_per_body: dict,
+    *,
+    logger=None,
 ) -> bytes:
     """Build a 3MF (zip) byte blob from per-body STLs.
 
     Skips disabled bodies and any body without an STL entry. Raises
     :class:`ValueError` if no bodies survive that filter (an empty 3MF
-    is malformed).
+    is malformed). Logs a warning (via ``logger`` if provided, else
+    silently skips) when a body's STL parses to zero triangles — the
+    file format is valid but contains no mesh, which would otherwise be
+    a silent divergence from ``build_stl_set``.
 
     Accepts ``stl_per_body`` keyed by either ``int`` or ``str`` — JS objects
     coerced through ``pyodide.toPy`` arrive with string keys, and a strict
@@ -193,6 +200,11 @@ def build_threemf(
             continue
         verts, tris = _parse_stl_binary(stl_per_body[body.id])
         if not tris:
+            if logger is not None:
+                logger(
+                    f"build_threemf: body {body.id} ({body.name}) has zero "
+                    "triangles; skipping (the per-body STL was empty)."
+                )
             continue
         body_meshes.append((body, verts, tris))
     if not body_meshes:

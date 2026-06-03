@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Back-compat shim — the implementation moved to the ``stomppad`` package.
 
-Phase 0 of the v2 plan packages the geometry pipeline into ``stomppad/``.
-This module is kept so that ``import pyramid_position_calculator`` and
-``python pyramid_position_calculator.py`` continue to work unchanged for
-existing callers (the desktop GUI, frozen binaries, and any user scripts).
+**New code should import :mod:`stomppad` directly** — ``from stomppad
+import parse_svg_to_polygon`` and so on. This shim exists only so that
+the standalone entry point (``python pyramid_position_calculator.py``)
+and any pre-v2 user scripts that still write ``import
+pyramid_position_calculator`` keep working. The desktop GUI was updated
+to import from ``stomppad`` in v2 Phase 1; the web frontend never used
+this module.
 """
 
 from stomppad import *  # noqa: F401,F403

@@ -32,6 +32,10 @@ a = Analysis(
         # bulk_processor_gui.setup_edit_tab, so PyInstaller's static
         # analyzer doesn't pick it up — declare it explicitly.
         'desktop_editor',
+        # Back-compat shim for legacy callers (user scripts, frozen pre-v2
+        # binaries). collect_submodules('stomppad') doesn't pick it up
+        # since it lives at the repo root, not inside the package.
+        'pyramid_position_calculator',
         *stomppad_hiddenimports,
     ],
     hookspath=[],

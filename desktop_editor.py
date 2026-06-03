@@ -539,10 +539,35 @@ class EditTab:
             messagebox.showinfo("Export", "No enabled bodies to export.")
             return None
 
+        # Visible status while the loop runs — OpenSCAD subprocesses are
+        # synchronous in the main thread and the window will appear frozen
+        # for the duration. Disabling the buttons + flushing the repaint
+        # before the loop gives the user a clear "rendering, please wait"
+        # signal even though we don't have a true progress dialog. (Phase 4
+        # candidate: move to a worker thread with a queue-drained progress
+        # bar.)
+        self._export_stl_btn.configure(state="disabled")
+        self._export_3mf_btn.configure(state="disabled")
+        prior_stamp = self._stamp_var.get()
+        total = len(scads)
+        self._stamp_var.set(
+            f"rendering 0/{total} bodies via OpenSCAD — UI will freeze briefly…"
+        )
+        try:
+            self._parent.update_idletasks()
+        except tk.TclError:
+            pass
+
         stl_by_body: dict[int, bytes] = {}
-        with tempfile.TemporaryDirectory(prefix="stomppad-render-") as tmp:
-            tmp_dir = Path(tmp)
-            for body_id, scad in scads.items():
+        tmp_ctx = tempfile.TemporaryDirectory(prefix="stomppad-render-")
+        try:
+            tmp_dir = Path(tmp_ctx.name)
+            for index, (body_id, scad) in enumerate(scads.items(), start=1):
+                self._stamp_var.set(f"rendering {index}/{total} bodies…")
+                try:
+                    self._parent.update_idletasks()
+                except tk.TclError:
+                    pass
                 scad_path = tmp_dir / f"body_{body_id}.scad"
                 stl_path = tmp_dir / f"body_{body_id}.stl"
                 scad_path.write_text(scad, encoding="utf-8")
@@ -572,6 +597,23 @@ class EditTab:
                 self._log(
                     f"[editor] body {body_id}: {len(stl_by_body[body_id]) / 1024:.1f} KB"
                 )
+        finally:
+            # Manual cleanup so Windows can't strand the directory if a
+            # subprocess (or its CGAL child) is still holding a handle to
+            # a file inside. The OS will eventually free the path; for
+            # this run we just log and move on.
+            try:
+                tmp_ctx.cleanup()
+            except (PermissionError, OSError) as exc:
+                self._log(
+                    f"[editor] tempdir cleanup deferred: {exc} "
+                    f"(safe to ignore on Windows when OpenSCAD child is still releasing)"
+                )
+            self._export_stl_btn.configure(state="normal")
+            self._export_3mf_btn.configure(state="normal")
+            if not stl_by_body:
+                self._stamp_var.set(prior_stamp)
+
         if not stl_by_body:
             messagebox.showerror(
                 "Export failed", "OpenSCAD produced no STLs. See Console for details."

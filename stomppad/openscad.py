@@ -223,22 +223,36 @@ def _flip_y(coords, viewbox_height: float) -> str:
 
 
 def _component_to_polygon_scad(component, viewbox_height: float, indent: str = "        ") -> str:
-    """Render a :class:`Component` as a SCAD 2D shape (``polygon`` with
-    ``difference()`` for holes). Self-contained — does not depend on the
-    source SVG."""
-    exterior = _flip_y(component.exterior, viewbox_height)
-    if not component.holes:
-        return f"{indent}polygon(points=[{exterior}]);"
-    inner = "\n".join(
-        f"{indent}    polygon(points=[{_flip_y(h, viewbox_height)}]);"
-        for h in component.holes
-    )
-    return (
-        f"{indent}difference() {{\n"
-        f"{indent}    polygon(points=[{exterior}]);\n"
-        f"{inner}\n"
-        f"{indent}}}"
-    )
+    """Render a :class:`Component` as a SCAD 2D shape using
+    ``polygon(points=, paths=)``.
+
+    OpenSCAD's single-primitive form for polygon-with-holes is the right
+    construct here: exterior + N holes share one vertex pool and the
+    ``paths`` argument names each ring by index. The earlier
+    ``difference(polygon, polygon, polygon)`` formulation was correct for
+    a convex exterior with one convex hole but ambiguous for two
+    overlapping or nested holes (CGAL behavior was undefined for those).
+    Self-contained — does not depend on the source SVG.
+    """
+    points: list[tuple[float, float]] = []
+    paths: list[list[int]] = []
+
+    def _add_ring(ring):
+        # Strip the closing duplicate vertex polygon() expects an open list.
+        pts = ring[:-1] if len(ring) >= 2 and ring[0] == ring[-1] else ring
+        indices = []
+        for x, y in pts:
+            indices.append(len(points))
+            points.append((x, viewbox_height - y))
+        paths.append(indices)
+
+    _add_ring(component.exterior)
+    for hole in component.holes:
+        _add_ring(hole)
+
+    points_str = ", ".join(f"[{x:.3f}, {y:.3f}]" for x, y in points)
+    paths_str = ", ".join("[" + ", ".join(str(i) for i in path) + "]" for path in paths)
+    return f"{indent}polygon(points=[{points_str}], paths=[{paths_str}]);"
 
 
 def generate_body_scad(
@@ -265,6 +279,7 @@ def generate_body_scad(
         params = {}
     merged = {**DEFAULT_RENDER_PARAMS, **project.global_params, **params}
     base_thickness = merged["base_thickness"]
+    outline_offset = merged["outline_offset"]
     outline_height = merged["outline_height"]
     pyramid_size = merged["pyramid_size"]
     pyramid_height = merged["pyramid_height"]
@@ -306,6 +321,7 @@ def generate_body_scad(
 // COORDINATE SYSTEM: SVG Y-down flipped to OpenSCAD Y-up via viewbox_height.
 
 base_thickness = {base_thickness};
+outline_offset = {outline_offset};
 outline_height = {outline_height};
 pyramid_size = {pyramid_size};
 pyramid_height = {pyramid_height};
@@ -320,6 +336,13 @@ module body_shape_2d() {{
     union() {{
 {shape_block}
     }}
+}}
+
+module body_outlined_shape_2d() {{
+    // Raised rim around the body's 2D footprint (matches the legacy
+    // single-shape assembly so multi-body STLs print with the same
+    // edge profile a Phase 0 single-shape pad would).
+    offset(r = outline_offset) body_shape_2d();
 }}
 
 module grip_pyramid(path_rotation=0) {{
@@ -345,8 +368,16 @@ module body_pyramids() {{
 }}
 
 module body_part() {{
+    // Base + raised rim as a single body; identical assembly to the
+    // legacy single-shape pad — wasm-CGAL kernel tolerates only this
+    // single-union-with-difference form for coplanar faces.
     union() {{
-        linear_extrude(height = total_height) body_shape_2d();
+        difference() {{
+            linear_extrude(height = total_height) body_outlined_shape_2d();
+            translate([0, 0, base_thickness]) {{
+                linear_extrude(height = total_height) body_shape_2d();
+            }}
+        }}
         body_pyramids();
     }}
 }}

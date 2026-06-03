@@ -89,6 +89,7 @@ def test_generate_body_scad_contains_inline_polygon(tmp_path):
         project, body, cache.positions_for(body.id),
     )
     assert "polygon(points=[" in scad
+    assert "paths=[" in scad, "polygon() should use the paths= form"
     assert "body_part();" in scad
     # The component's exterior coords should appear (smoke check that
     # _component_to_polygon_scad ran).
@@ -97,14 +98,40 @@ def test_generate_body_scad_contains_inline_polygon(tmp_path):
     assert f"{sample_x:.3f}" in scad
 
 
-def test_generate_body_scad_with_holes_emits_difference(tmp_path):
+def test_generate_body_scad_emits_outline_rim(tmp_path):
+    """The legacy single-shape pad has a raised rim around the boundary;
+    Phase 3 per-body SCAD must do the same so multi-body STLs print with
+    the same edge profile as a Phase 0 single-shape pad."""
+    project = _project(tmp_path, "disjoint.svg", DISJOINT)
+    cache = BodyOutputCache(project)
+    body = project.bodies[0]
+    scad = generate_body_scad(
+        project, body, cache.positions_for(body.id),
+    )
+    assert "outline_offset" in scad, "rim parameter must appear"
+    assert "offset(r = outline_offset)" in scad, "rim must use offset()"
+    assert "body_outlined_shape_2d" in scad, "rim module missing"
+    # The union/difference assembly that produces base + raised-rim is the
+    # wasm-CGAL-safe form — guard against accidental simplification.
+    assert "difference()" in scad, "rim assembly should use difference()"
+
+
+def test_generate_body_scad_with_holes_emits_paths_form(tmp_path):
     project = _project(tmp_path, "donut.svg", DONUT)
     cache = BodyOutputCache(project)
     body = project.bodies[0]
     scad = generate_body_scad(
         project, body, cache.positions_for(body.id),
     )
-    assert "difference()" in scad, "holes should be rendered via difference()"
+    # The polygon(paths=) form is one primitive with a path per ring; for
+    # a donut (exterior + 1 hole) the paths list has two entries.
+    import re
+    matches = re.findall(r"paths=\[(\[[^\]]+\](?:\s*,\s*\[[^\]]+\])*)\]", scad)
+    assert matches, "polygon() with paths= not found"
+    # At least one polygon should have 2+ rings (exterior + hole).
+    assert any(p.count("[") >= 2 for p in matches), (
+        "polygon with holes should declare two rings in paths="
+    )
 
 
 def test_generate_per_body_scads_skips_disabled(tmp_path):
@@ -211,7 +238,7 @@ def test_parse_stl_binary_dedupes_vertices():
 
 def test_parse_stl_binary_rejects_truncated():
     truncated = b"\x00" * 80 + struct.pack("<I", 10)  # claims 10 tris, data ends here
-    with pytest.raises(ValueError, match="truncated"):
+    with pytest.raises(ValueError, match="malformed"):
         _parse_stl_binary(truncated)
 
 
@@ -225,6 +252,41 @@ def test_parse_stl_binary_rejects_ascii():
     padded = ascii_stl + b"\x00" * 200
     with pytest.raises(ValueError, match="ASCII"):
         _parse_stl_binary(padded)
+
+
+def test_parse_stl_binary_accepts_binary_with_facet_in_header():
+    """Regression for the header-sniffing false-positive: a binary STL
+    whose 80-byte junk header contains the byte sequence "facet" used to
+    be wrongly rejected as ASCII. Structural detection (length match)
+    accepts it."""
+    header = (b"solid " + b"facet xx " * 8).ljust(80, b"\x00")
+    assert b"facet" in header
+    assert header[:5] == b"solid"
+    tris = [((0, 0, 0), (1, 0, 0), (0, 1, 0))]
+    stl = header + struct.pack("<I", len(tris))
+    for v1, v2, v3 in tris:
+        stl += struct.pack("<3f", 0.0, 0.0, 1.0)
+        for v in (v1, v2, v3):
+            stl += struct.pack("<3f", *v)
+        stl += b"\x00\x00"
+    verts, parsed_tris = _parse_stl_binary(stl)
+    assert len(parsed_tris) == 1
+    assert len(verts) == 3
+
+
+def test_build_threemf_logs_zero_triangle_skip(tmp_path):
+    """Zero-triangle bodies are silently dropped from the 3MF unless a
+    logger is supplied — make sure the warning fires when it is."""
+    project = _project(tmp_path, "disjoint.svg", DISJOINT)
+    empty_stl = b"\x00" * 80 + struct.pack("<I", 0)  # valid 0-triangle STL
+    nonempty = _synthetic_stl([((0, 0, 0), (1, 0, 0), (0, 1, 0))])
+    messages: list[str] = []
+    build_threemf(
+        project,
+        {0: empty_stl, 1: nonempty, 2: nonempty},
+        logger=messages.append,
+    )
+    assert any("zero triangles" in m for m in messages)
 
 
 def test_build_threemf_zip_structure(tmp_path):

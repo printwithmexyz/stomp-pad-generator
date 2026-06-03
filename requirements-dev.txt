@@ -9,10 +9,14 @@ pytest>=8.0
 # against a captured .scad. medial_axis (scikit-image) and eigh (numpy)
 # are deterministic within a library version but can shift by ±1 ULP across
 # minor versions / BLAS implementations, which would flip the f"{x:.3f}"
-# formatting of a position and break the byte check.
+# formatting of a position and break the byte check. shapely is pinned for
+# the same reason — unary_union and prep()'s contains output orderings can
+# shift across GEOS versions, which propagates into the position list
+# coordinates downstream.
 #
-# When intentionally bumping either pin, re-run
+# When intentionally bumping any pin, re-run
 #   python tests/fixtures/_capture_golden.py
 # and inspect the diff before committing the new sample_golden.scad.
 numpy==2.4.6
 scikit-image==0.26.0
+shapely==2.1.2

@@ -12,8 +12,6 @@ import { drawEditor } from './preview-2d.js';
 import { renderStl } from './scad-renderer.js';
 import { buildZip } from './zip.js';
 
-const PATTERN_OPTIONS = ['skeleton', 'hexagonal', 'rectangular', 'triangular'];
-
 export function createEditor({ pyodide, root, log }) {
   // root: { canvas, sidebar, fileInput, downloadBtn, autosaveToggle, savedStamp }
   let editorHandle = null; // { dispose, state, refresh }
@@ -80,7 +78,6 @@ def _editor_pattern_names():
     let state = null;
     let transform = null;
     let autosaveTimer = null;
-    let dirty = false;
 
     function patternNames() {
       const fn = pyodide.globals.get('_editor_pattern_names');
@@ -103,7 +100,7 @@ def _editor_pattern_names():
     function refresh() {
       state = pullState();
       if (!state) return;
-      transform = drawEditor(root.canvas, state, { pyramidSize: 4 });
+      transform = drawEditor(root.canvas, state);
       renderSidebar(state, patternNames());
       markDirty();
     }
@@ -113,7 +110,6 @@ def _editor_pattern_names():
         root.savedStamp.textContent = 'unsaved';
         return;
       }
-      dirty = true;
       clearTimeout(autosaveTimer);
       autosaveTimer = setTimeout(() => {
         // Browser can't write next to the SVG — fall through to the
@@ -121,7 +117,6 @@ def _editor_pattern_names():
         // browser silently prepares the latest JSON and shows "saved at"
         // (a real save would land in the desktop editor).
         root.savedStamp.textContent = `prepared ${new Date().toLocaleTimeString()}`;
-        dirty = false;
       }, 500);
     }
 
@@ -129,10 +124,17 @@ def _editor_pattern_names():
       root.sidebar.innerHTML = '';
       const header = document.createElement('header');
       header.className = 'editor-header';
-      header.innerHTML = `
-        <strong>${file.name}</strong>
-        <span class="editor-counts">${s.components.length} component${s.components.length === 1 ? '' : 's'}, ${s.bodies.length} bod${s.bodies.length === 1 ? 'y' : 'ies'}</span>
-      `;
+      // file.name flows in from the OS file picker; use textContent /
+      // explicit DOM construction so a maliciously-named file (e.g.
+      // `<img src=x onerror=…>.svg`) can't execute as HTML.
+      const nameEl = document.createElement('strong');
+      nameEl.textContent = file.name;
+      const countsEl = document.createElement('span');
+      countsEl.className = 'editor-counts';
+      countsEl.textContent =
+        `${s.components.length} component${s.components.length === 1 ? '' : 's'}, `
+        + `${s.bodies.length} bod${s.bodies.length === 1 ? 'y' : 'ies'}`;
+      header.append(nameEl, countsEl);
       root.sidebar.appendChild(header);
 
       const list = document.createElement('ul');
@@ -233,7 +235,18 @@ def _editor_pattern_names():
       const px = event.clientX - rect.left;
       const py = event.clientY - rect.top;
       const [svgX, svgY] = transform.fromPixel(px, py);
+      // hit_test returns a Python int (auto-converted to JS number) or
+      // None (auto-converted to undefined). Primitives don't allocate a
+      // PyProxy; nothing to destroy. If the API ever returns a proxy,
+      // the runtime would throw on the comparison below — make the
+      // assumption explicit so future drift is caught.
       const hit = pyodide.runPython(`_editor_project.hit_test(${svgX}, ${svgY})`);
+      if (hit !== null && hit !== undefined && typeof hit !== 'number') {
+        // Defensive: destroy if Pyodide unexpectedly returned a proxy.
+        hit.destroy?.();
+        log(`[editor] hit_test returned unexpected type ${typeof hit}; ignoring`);
+        return;
+      }
       if (hit === null || hit === undefined) {
         if (!event.shiftKey) mutate('_editor_project.clear_selection()');
         return;
@@ -282,8 +295,23 @@ def _editor_pattern_names():
       return py;
     }
 
+    function deletePythonGlobals(names) {
+      // Wrap in try/except so a missing global (never created) doesn't
+      // raise on cleanup. Releases the WASM heap held by per-body STLs.
+      const expr = names
+        .map((n) => `try:\n    del ${n}\nexcept NameError:\n    pass`)
+        .join('\n');
+      try { pyodide.runPython(expr); } catch { /* best effort */ }
+    }
+
     handlers.exportStl = async () => {
-      const stlByBody = await renderEnabledBodies();
+      let stlByBody;
+      try {
+        stlByBody = await renderEnabledBodies();
+      } catch (e) {
+        log(`[editor] STL set export aborted: ${e.message || e}`);
+        return;
+      }
       if (Object.keys(stlByBody).length === 0) {
         log('[editor] nothing to export (no enabled bodies)');
         return;
@@ -309,14 +337,29 @@ def _editor_pattern_names():
           file.name.replace(/\.svg$/i, '') + '-stl-set.zip'
         );
         root.savedStamp.textContent = `STL set: ${Object.keys(stlByBody).length} bodies`;
+      } catch (e) {
+        log(`[editor] STL set export failed: ${e.message || e}`);
       } finally {
         pyDict.destroy?.();
+        // Free the WASM-heap-resident per-body STL bytes + intermediate
+        // bundle / scads now that the download is queued.
+        deletePythonGlobals([
+          '_editor_per_body_scads',
+          '_editor_stl_by_body',
+          '_editor_stl_bundle',
+        ]);
       }
     };
     root.exportStlBtn.addEventListener('click', handlers.exportStl);
 
     handlers.export3mf = async () => {
-      const stlByBody = await renderEnabledBodies();
+      let stlByBody;
+      try {
+        stlByBody = await renderEnabledBodies();
+      } catch (e) {
+        log(`[editor] 3MF export aborted: ${e.message || e}`);
+        return;
+      }
       if (Object.keys(stlByBody).length === 0) {
         log('[editor] nothing to export (no enabled bodies)');
         return;
@@ -339,6 +382,11 @@ def _editor_pattern_names():
         log(`[editor] 3MF export failed: ${e.message || e}`);
       } finally {
         pyDict.destroy?.();
+        deletePythonGlobals([
+          '_editor_per_body_scads',
+          '_editor_stl_by_body',
+          '_editor_threemf_bytes',
+        ]);
       }
     };
     root.export3mfBtn.addEventListener('click', handlers.export3mf);
@@ -365,6 +413,23 @@ def _editor_pattern_names():
         root.sidebar.innerHTML = '';
         const ctx = root.canvas.getContext('2d');
         ctx.clearRect(0, 0, root.canvas.width, root.canvas.height);
+        // Release the WASM-heap-resident project + cache + intermediates
+        // so opening a second file doesn't accumulate prior projects in
+        // Pyodide's heap.
+        deletePythonGlobals([
+          '_editor_project',
+          '_editor_cache',
+          '_editor_components',
+          '_editor_svg_info',
+          '_editor_parsed',
+          '_editor_state',
+          '_editor_pattern_names',
+          '_editor_per_body_scads',
+          '_editor_stl_by_body',
+          '_editor_stl_bundle',
+          '_editor_threemf_bytes',
+          '_editor_filename',
+        ]);
       },
     };
   }
@@ -385,7 +450,14 @@ def _editor_pattern_names():
     editorHandle = null;
     const ctx = root.canvas.getContext('2d');
     ctx.clearRect(0, 0, root.canvas.width, root.canvas.height);
-    root.sidebar.innerHTML = `<p class="editor-empty">${message}</p>`;
+    // textContent on a single <p> — message may include file.name (from
+    // the failed-parse path); plain text avoids the same XSS vector the
+    // sidebar header was vulnerable to.
+    root.sidebar.innerHTML = '';
+    const p = document.createElement('p');
+    p.className = 'editor-empty';
+    p.textContent = message;
+    root.sidebar.appendChild(p);
     root.savedStamp.textContent = '';
   }
 
