@@ -139,10 +139,19 @@ def _editor_pattern_names():
 
       const list = document.createElement('ul');
       list.className = 'editor-bodies';
+      // Pre-compute which bodies own a selected component so the
+      // sidebar highlights flow from a canvas click (selecting a
+      // component) without a second select_body() round-trip.
+      const selectedCompSet = new Set(s.selected_component_ids || []);
+      const bodyOwnsSelected = (body) =>
+        body.component_ids.some((cid) => selectedCompSet.has(cid));
+
       for (const body of s.bodies) {
         const li = document.createElement('li');
         li.className = 'editor-body';
-        if (s.selected_body_id === body.id) li.classList.add('is-selected');
+        if (s.selected_body_id === body.id || bodyOwnsSelected(body)) {
+          li.classList.add('is-selected');
+        }
 
         const swatch = document.createElement('input');
         swatch.type = 'color';
@@ -289,7 +298,12 @@ def _editor_pattern_names():
         log(`[editor] rendering body ${bid}…`);
         const t0 = performance.now();
         try {
-          stlByBody[bid] = await renderStl(scad);
+          // forceFresh: rebuild the openscad-wasm instance per body so
+          // an abort during body N (the 2025 manifold backend has been
+          // observed to abort after a successful render under some
+          // per-body inline-polygon geometry) doesn't cascade-fail
+          // every subsequent body's render in the same export.
+          stlByBody[bid] = await renderStl(scad, null, null, { forceFresh: true });
           log(`[editor] body ${bid}: ${(stlByBody[bid].length / 1024).toFixed(1)} KB in ${(performance.now() - t0).toFixed(0)}ms`);
         } catch (e) {
           log(`[editor] body ${bid} FAILED: ${e.message || e}`);

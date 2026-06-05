@@ -94,10 +94,23 @@ function describeOpenscadError(thrown, instance) {
   return String(thrown);
 }
 
-export async function renderStl(scadText, svgFilename = null, svgText = null) {
+export async function renderStl(
+  scadText,
+  svgFilename = null,
+  svgText = null,
+  { forceFresh = false } = {},
+) {
   // svgFilename/svgText are only needed for the legacy single-shape SCAD which
   // does `import("foo.svg")`. The Phase 3 per-body SCADs inline geometry via
   // polygon() and don't need either; callers pass null to skip the SVG write.
+  //
+  // forceFresh=true throws away the cached WASM instance and builds a new
+  // one for THIS call. Use it from the per-body editor export: the 2025
+  // manifold backend sometimes leaves the instance in a state where the
+  // next callMain throws "program has already aborted!", and we lose
+  // every subsequent body. A fresh instance per body is ~1–2 s slower
+  // but reliable across multiple renders.
+  if (forceFresh) instancePromise = null;
   const instance = await getInstance();
 
   clearWorkingFiles(instance);
@@ -112,6 +125,15 @@ export async function renderStl(scadText, svgFilename = null, svgText = null) {
   try {
     instance.callMain(['/input.scad', '-o', '/output.stl']);
   } catch (e) {
+    // Once Emscripten's abort() fires inside the WASM, every subsequent
+    // callMain on the same instance throws "program has already
+    // aborted!" with no useful detail. Drop the cached instance so the
+    // next render (caller's retry, next file in a batch, next body in
+    // an editor export) gets a fresh one.
+    const message = String(e?.message || e);
+    if (message.includes('aborted')) {
+      instancePromise = null;
+    }
     const reason = describeOpenscadError(e, instance);
     const tail = stderrLines.slice(-5).join('\n').trim();
     throw new Error(tail ? `${reason}\n${tail}` : reason);

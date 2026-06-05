@@ -35,6 +35,7 @@ from stomppad import (  # noqa: E402
 from stomppad.exporters import build_stl_set, build_threemf, write_stl_set  # noqa: E402
 from stomppad.exporters.stl_set import _safe_filename  # noqa: E402
 from stomppad.exporters.threemf import (  # noqa: E402
+    _parse_stl,
     _parse_stl_binary,
     _to_3mf_color,
 )
@@ -269,6 +270,77 @@ def test_parse_stl_binary_rejects_ascii():
     padded = ascii_stl + b"\x00" * 200
     with pytest.raises(ValueError, match="ASCII"):
         _parse_stl_binary(padded)
+
+
+def test_parse_stl_accepts_ascii_stl():
+    """openscad-wasm's 2025 manifold backend emits ASCII STL even though
+    OpenSCAD's CLI default is binary; the 3MF export path must accept
+    both via the dispatching _parse_stl helper."""
+    ascii_stl = (
+        b"solid demo\n"
+        b"  facet normal 0 0 1\n"
+        b"    outer loop\n"
+        b"      vertex 0.0 0.0 0.0\n"
+        b"      vertex 1.0 0.0 0.0\n"
+        b"      vertex 0.0 1.0 0.0\n"
+        b"    endloop\n"
+        b"  endfacet\n"
+        b"  facet normal 0 0 1\n"
+        b"    outer loop\n"
+        b"      vertex 0.0 0.0 0.0\n"
+        b"      vertex 1.0 1.0 0.0\n"
+        b"      vertex 0.0 1.0 0.0\n"
+        b"    endloop\n"
+        b"  endfacet\n"
+        b"endsolid demo\n"
+    )
+    verts, tris = _parse_stl(ascii_stl)
+    assert len(tris) == 2
+    # Two triangles sharing (0,0,0) and (0,1,0) → 4 unique vertices.
+    assert len(verts) == 4
+
+
+def test_parse_stl_falls_back_to_binary_when_ascii_starts_with_solid():
+    """A binary STL whose 80-byte header starts with `solid` (some tools
+    write that to the header) is correctly identified as binary by the
+    dispatcher's fallback — the ASCII parser sees no `vertex` lines, so
+    _parse_stl tries binary next."""
+    header = b"solid " + (b"\x00" * 74)
+    tris = [((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0))]
+    stl = header + struct.pack("<I", len(tris))
+    for v1, v2, v3 in tris:
+        stl += struct.pack("<3f", 0.0, 0.0, 1.0)
+        for v in (v1, v2, v3):
+            stl += struct.pack("<3f", *v)
+        stl += b"\x00\x00"
+    verts, parsed_tris = _parse_stl(stl)
+    assert len(parsed_tris) == 1
+    assert len(verts) == 3
+
+
+def test_build_threemf_accepts_ascii_stl(tmp_path):
+    """End-to-end: an ASCII STL flows through build_threemf and produces
+    a valid 3MF object."""
+    project = _project(tmp_path, "disjoint.svg", DISJOINT)
+    ascii_stl = (
+        b"solid body\n"
+        b"  facet normal 0 0 1\n"
+        b"    outer loop\n"
+        b"      vertex 0 0 0\n"
+        b"      vertex 1 0 0\n"
+        b"      vertex 0 1 0\n"
+        b"    endloop\n"
+        b"  endfacet\n"
+        b"endsolid body\n"
+    )
+    blob = build_threemf(project, {0: ascii_stl})
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        model = zf.read("3D/3dmodel.model").decode("utf-8")
+    root = ET.fromstring(model)
+    objects = root.findall(
+        ".//{http://schemas.microsoft.com/3dmanufacturing/core/2015/02}object"
+    )
+    assert len(objects) == 1
 
 
 def test_parse_stl_binary_accepts_binary_with_facet_in_header():

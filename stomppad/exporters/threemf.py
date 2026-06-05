@@ -61,17 +61,71 @@ def _to_3mf_color(hex_color: Optional[str]) -> str:
     return "#CCCCCCFF"
 
 
+def _parse_stl(data: bytes) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
+    """Parse an STL (ASCII or binary) into deduplicated vertices +
+    triangle indices.
+
+    Tries ASCII first if the data starts with ``solid`` (the ASCII
+    sentinel); a real binary STL can also start with those bytes inside
+    its 80-byte junk header, so a failed ASCII parse falls through to
+    the binary path. openscad-wasm 2025's manifold backend has been
+    observed to emit ASCII STL even though OpenSCAD's CLI default is
+    binary, so this fallback is load-bearing for the web Export flow.
+    """
+    if data[:5] == b"solid":
+        try:
+            verts, tris = _parse_stl_ascii(data)
+            if tris:
+                return verts, tris
+        except ValueError:
+            pass  # try binary
+    return _parse_stl_binary(data)
+
+
+def _parse_stl_ascii(data: bytes) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
+    """Parse an ASCII STL. Permissive: ignores whitespace + ``solid`` /
+    ``facet`` / ``outer loop`` / ``endloop`` / ``endfacet`` / ``endsolid``
+    keywords. Only ``vertex x y z`` lines contribute geometry."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("not ASCII STL (UTF-8 decode failed)")
+    vertices: list[tuple[float, float, float]] = []
+    triangles: list[tuple[int, int, int]] = []
+    vertex_to_index: dict[tuple[float, float, float], int] = {}
+    current_tri: list[int] = []
+    for line in text.split("\n"):
+        s = line.strip()
+        if not s.startswith("vertex"):
+            continue
+        parts = s.split()
+        if len(parts) < 4:
+            continue
+        try:
+            v = (float(parts[1]), float(parts[2]), float(parts[3]))
+        except ValueError:
+            continue
+        idx = vertex_to_index.get(v)
+        if idx is None:
+            idx = len(vertices)
+            vertex_to_index[v] = idx
+            vertices.append(v)
+        current_tri.append(idx)
+        if len(current_tri) == 3:
+            triangles.append((current_tri[0], current_tri[1], current_tri[2]))
+            current_tri = []
+    return vertices, triangles
+
+
 def _parse_stl_binary(data: bytes) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
     """Parse a binary STL into ``(vertices, triangles)`` with shared
     vertices deduplicated by exact coordinate match. Triangle indices
     reference into the vertex list.
 
     Detection is **structural**, not header-sniffing: a binary STL's
-    payload size is exactly ``84 + triangle_count * 50``. The earlier
-    ``b"facet" in data[:512]`` ASCII heuristic false-positived on any
-    binary STL whose 80-byte junk header happened to contain the byte
-    sequence for "facet" — which happens often enough on real
-    openscad-wasm output to matter. The size check is unambiguous.
+    payload size is exactly ``84 + triangle_count * 50``. Use
+    :func:`_parse_stl` rather than calling this directly — it dispatches
+    between ASCII and binary based on the file's actual format.
     """
     if len(data) < 84:
         raise ValueError(f"STL too short ({len(data)} bytes); not a binary STL")
@@ -198,7 +252,7 @@ def build_threemf(
     for body in project.bodies:
         if not body.enabled or body.id not in stl_per_body:
             continue
-        verts, tris = _parse_stl_binary(stl_per_body[body.id])
+        verts, tris = _parse_stl(stl_per_body[body.id])
         if not tris:
             if logger is not None:
                 logger(
