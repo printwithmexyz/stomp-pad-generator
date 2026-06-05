@@ -61,9 +61,16 @@ def _to_3mf_color(hex_color: Optional[str]) -> str:
     return "#CCCCCCFF"
 
 
-def _parse_stl(data: bytes) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
+def _parse_stl(data) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
     """Parse an STL (ASCII or binary) into deduplicated vertices +
     triangle indices.
+
+    Accepts ``bytes`` / ``bytearray`` / ``memoryview``. The web path
+    feeds STL bytes in via ``pyodide.toPy(Uint8Array)`` which produces
+    a zero-copy ``memoryview`` rather than ``bytes`` — and
+    ``memoryview`` has no ``.decode``, so the ASCII parser needs a
+    real bytes object. Normalize at the entry point so neither
+    sub-parser has to think about the buffer type.
 
     Tries ASCII first if the data starts with ``solid`` (the ASCII
     sentinel); a real binary STL can also start with those bytes inside
@@ -72,6 +79,11 @@ def _parse_stl(data: bytes) -> tuple[list[tuple[float, float, float]], list[tupl
     observed to emit ASCII STL even though OpenSCAD's CLI default is
     binary, so this fallback is load-bearing for the web Export flow.
     """
+    if not isinstance(data, (bytes, bytearray)):
+        # memoryview / Pyodide JS buffer proxy / numpy bytes view → bytes.
+        # Costs one allocation; acceptable since this is a one-time parse
+        # per body during export, not a hot inner loop.
+        data = bytes(data)
     if data[:5] == b"solid":
         try:
             verts, tris = _parse_stl_ascii(data)

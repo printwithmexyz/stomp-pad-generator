@@ -272,6 +272,31 @@ def test_parse_stl_binary_rejects_ascii():
         _parse_stl_binary(padded)
 
 
+def test_parse_stl_accepts_memoryview_input():
+    """pyodide.toPy(Uint8Array) yields a zero-copy memoryview, not
+    bytes. The ASCII sub-parser calls .decode() which memoryview
+    doesn't have — _parse_stl must normalize to bytes at the entry
+    point so neither the ASCII nor the binary path sees raw
+    memoryview. Regression for the AttributeError surfaced on the
+    cat-paw 3MF export."""
+    ascii_stl = (
+        b"solid demo\n"
+        b"facet normal 0 0 1\nouter loop\n"
+        b"vertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\n"
+        b"endloop\nendfacet\nendsolid demo\n"
+    )
+    view = memoryview(ascii_stl)
+    verts, tris = _parse_stl(view)
+    assert len(tris) == 1
+    assert len(verts) == 3
+
+    # And a binary memoryview path too.
+    binary = _synthetic_stl([((0, 0, 0), (1, 0, 0), (0, 1, 0))])
+    bview = memoryview(binary)
+    verts, tris = _parse_stl(bview)
+    assert len(tris) == 1
+
+
 def test_parse_stl_accepts_ascii_stl():
     """openscad-wasm's 2025 manifold backend emits ASCII STL even though
     OpenSCAD's CLI default is binary; the 3MF export path must accept
