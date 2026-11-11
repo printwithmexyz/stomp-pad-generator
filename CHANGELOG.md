@@ -47,11 +47,6 @@ section below into the GitHub release body.
   print that other colors surround is absorbed by a neighbour.
 - **STL renders fail loudly** when OpenSCAD reports leaving a shape out,
   instead of saving an STL with material missing.
-
-### Fixed
-
-- **Shapes that meet at a single point** (two squares corner to corner)
-  could make OpenSCAD drop the cavity cut and render a solid slab.
 - Pyramid bases are checked in the shape the `.scad` draws them, so
   `Pyramid Style` values other than 4 fit properly.
 
@@ -65,6 +60,8 @@ section below into the GitHub release body.
 - Pyramid rotation was mirrored on diagonal strokes.
 - The same SVG could produce a different pyramid count from run to run.
 - The desktop cache returned stale results after a parameter change.
+- Shapes that meet at a single point (two squares corner to corner) could
+  make OpenSCAD drop the cavity cut and render a solid slab.
 - The web app could lose its Python runtime on roughly 3 in 100 logos and
   hang. Geometry operations can no longer trigger that, and the page reports
   it if it ever happens.
