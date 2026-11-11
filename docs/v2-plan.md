@@ -88,9 +88,14 @@ Known gaps:
   importer's source, and lib3mf (strict mode) and trimesh read it back as
   closed, correctly oriented meshes. Bambu Studio binaries could not be
   downloaded into the test environment.
-- Body renders were checked on real icons in both hole modes with the
-  OpenSCAD WebAssembly build: no shape dropped, and the bodies add up to the
-  whole pad within 0.01%. Native OpenSCAD has not been run.
+- Body renders were checked on 70 real icons (31 of them multicolor, 236
+  renders, both hole modes) with the OpenSCAD WebAssembly build: no shape
+  dropped, and the bodies add up to the whole pad within 0.03%. Earlier
+  rounds of the same sweep are what found the point-contact and
+  crowded-corner failures described in `docs/architecture.md`. Native
+  OpenSCAD has not been run.
+- The multicolor code was scanned in Pyodide twice over 354 real icons, both
+  hole modes: 0 crashes.
 - OrcaSlicer shares Bambu Studio's 3MF reader by descent, but its source was
   not checked.
 
