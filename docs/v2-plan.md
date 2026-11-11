@@ -4,6 +4,36 @@
 separate review gate (max 5 files/response, `code-review-tester` after each
 logical chunk, `readme-auditor` after doc-affecting changes).
 
+## Revision 2026-11-11 (supersedes the sections below where they conflict)
+
+Scope for this round is correct SVG handling, multicolor, and 3MF. Decisions
+changed in the second interview:
+
+| Topic | Was | Now |
+|---|---|---|
+| Interactive editor (Phase 2) | In scope, web + desktop | **Deferred.** Manual tweaks are a region list (drop / recolor by id), not a canvas editor. |
+| Who reads the SVG | Python for packing, OpenSCAD `import()` for the body | **Python only.** Shapes are written into the `.scad` as polygons. Two parsers disagreeing caused the transform and Y-flip bugs, and `import()` cannot drop backgrounds or split colors. |
+| Shapes inside shapes | Even-odd nesting across elements decides hole vs body | **Paint order.** Regions are what a browser would show: later elements cover earlier ones, fill rules decide holes within a path. Anything painted in the dropped background's color, or in a listed void color, cuts a hole. |
+| Color layout | Base is a colorable body | **Shared base, colored top.** One color for the bottom layers and rim; each color region owns its top layers and pyramids. |
+| 3MF | Generic only | **Generic plus Bambu part-to-filament metadata**, format to be verified against a real Bambu Studio export. |
+
+Phases, each a review gate:
+
+- **A. Regions (done, not wired in).** `stomppad/svg_parse.py` and
+  `stomppad/refine.py`: transforms, CSS classes, fill rules, strokes, paint
+  order, background drop, void fills, scaling to mm, cleanup (near-duplicate
+  colors, slivers, specks, pinholes), printability warnings, drop / recolor
+  overrides. Tests in `tests/test_svg_regions.py` (`python -m pytest`).
+- **B. Wire in.** Pack per region with holes respected, emit region polygons
+  in the `.scad`, retire `parse_svg_to_polygon`, zip-sync the package into the
+  web build, update the desktop app and PyInstaller spec.
+- **C. Multicolor export.** One body per color plus the base, STL set, 3MF.
+- **D. Region list UI.** Show regions, warnings, and drop / recolor controls
+  in web and desktop.
+
+Open for Phase B: whether a void inside the artwork is a through-hole (today's
+behavior for holes) or a recess that shows the base color.
+
 ## Decisions locked (from interview)
 
 | Decision | Choice |
