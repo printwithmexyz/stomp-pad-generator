@@ -69,9 +69,14 @@ Decided in C1:
   of filaments equals the number of colors. `base_color` overrides it, and a
   color no region uses adds a filament.
 - **Removed slivers.** A neighbour absorbs them (this was the open question
-  below). A piece counts as surrounded when kept colors border at least 80%
-  of its outline; pieces on the outer edge stay removed. Without this a
-  dropped speck inside another color became a hole through the pad.
+  below). Only what lies where kept colors face each other across an
+  unprintable gap is considered, and a piece there is absorbed when kept
+  colors border at least 80% of its outline. It goes to the color it borders
+  most. Whatever cleanup removed from the outer edge stays removed. Without
+  this a dropped speck where colors meet became a hole through the pad, and a
+  dropped hairline showed the base color.
+- **Base color within merge tolerance.** A `base_color` that cleanup would
+  have merged into one of the art's colors means that color.
 - **3MF colors.** Parts are named after their colors and carry Bambu filament
   slots. Standard 3MF colors are optional (`standard_colors=True`) and off by
   default: recent Bambu Studio versions open a color-matching dialog for
@@ -83,9 +88,11 @@ Known gaps:
   importer's source, and lib3mf (strict mode) and trimesh read it back as
   closed, correctly oriented meshes. Bambu Studio binaries could not be
   downloaded into the test environment.
-- Body renders were checked on 33 real icons (110 renders, both hole modes)
-  with the OpenSCAD WebAssembly build: no shape dropped, and the bodies add
-  up to the whole pad within 0.004%. Native OpenSCAD has not been run.
+- Body renders were checked on real icons in both hole modes with the
+  OpenSCAD WebAssembly build: no shape dropped, and the bodies add up to the
+  whole pad within 0.01%. Native OpenSCAD has not been run.
+- OrcaSlicer shares Bambu Studio's 3MF reader by descent, but its source was
+  not checked.
 
 - **GEOS errors kill Pyodide (handled).** In Pyodide (checked on 0.26.4 and
   0.29.0) a C++ exception from GEOS is not turned into a Python exception. It

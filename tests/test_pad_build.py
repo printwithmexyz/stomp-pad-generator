@@ -13,7 +13,7 @@ from shapely.geometry import Point, Polygon, box
 from stomppad import packing
 from stomppad.openscad import generate_openscad
 from stomppad.packing import PackingSettings, calculate_skeleton, hex_grid, pyramid_footprints
-from stomppad.pad import OUTPUT_STEP, PadSettings, build_pad
+from stomppad.pad import OUTPUT_STEP, PadSettings, _tidy, build_pad
 from stomppad.overlay import polygon_parts, robust_union
 
 DONUT = ('<path fill-rule="evenodd" d="M50 5 A45 45 0 1 0 50 95 A45 45 0 1 0 50 5 Z '
@@ -395,6 +395,14 @@ def test_single_color_pad_with_a_base_color_is_two_tone(svg):
     assert [body.fill for body in design.bodies] == ['#222222', '#ff0000']
 
 
+def test_base_color_a_shade_off_an_art_color_means_that_color(svg):
+    art = ('<rect width="60" height="50" fill="#000000"/><rect x="60" width="10" height="50" fill="#010102"/>'
+           '<rect x="70" width="30" height="50" fill="#ff0000"/>')
+    design = build(svg(art), multicolor=True, base_color='#020101')
+    assert [body.fill for body in design.bodies] == ['#000000', '#ff0000']
+    assert design.warnings == build(svg(art), multicolor=True).warnings
+
+
 @pytest.mark.parametrize('bad_color', ['none', 'not-a-color'])
 def test_base_color_must_be_a_color(bad_color):
     with pytest.raises(ValueError):
@@ -435,12 +443,20 @@ def test_shapes_for_the_scad_sit_on_the_output_grid_with_no_specks(svg):
             assert all(Polygon(ring).area > 0.01 for ring in [polygon.exterior, *polygon.interiors])
 
 
+def test_tidy_clears_what_openscad_would_choke_on():
+    plate = box(0, 0, 20, 10).difference(box(5, 5, 5.0003, 5.0003)).union(box(20, 4, 22, 4.0003))
+    tidied = _tidy(plate)
+    assert tidied.equals(box(0, 0, 20, 10))
+
+
 def test_scad_has_one_color_branch_per_body_above_the_base(svg):
     design = build(svg(BADGE, **BADGE_SIZE), multicolor=True, keep_background=True, color_depth=0.4)
     scad = generate_openscad(design)
     assert scad_value(scad, 'part') == '0'
     assert scad_value(scad, 'color_depth') == '0.4'
     assert scad_value(scad, 'color_bodies') == '[2, 3, 4]'
+    assert scad_value(scad, 'color_overlap') == '0.005'
+    assert 'offset(delta = color_overlap) color_2d(body);' in scad
     color_module = re.search(r'module color_2d\(body\) \{\n(.*?)^\}', scad, re.DOTALL | re.MULTILINE).group(1)
     assert re.findall(r'if \(body == (\d+)\) \{', color_module) == ['2', '3', '4']
     assert '//   1 = #111111 (base' in scad and '//   4 = #ffffff' in scad
@@ -454,12 +470,13 @@ def test_color_depth_is_capped_at_the_base_thickness(svg):
     assert not any('run through' in w for w in build(svg(TWO_TONE), base_thickness=1, color_depth=3).warnings)
 
 
-def test_a_speck_of_another_color_does_not_become_a_hole(svg):
-    art = ('<rect width="100" height="60" fill="#e63946"/>'
-           '<rect x="40" y="30" width="0.7" height="0.7" fill="#ffffff"/>')
-    design = build(svg(art, **BADGE_SIZE), multicolor=True, keep_background=True)
+def test_a_speck_where_two_colors_meet_does_not_become_a_hole(svg):
+    art = ('<rect width="50" height="60" fill="#e63946"/><rect x="50" width="50" height="60" fill="#1d3557"/>'
+           '<rect x="49.6" y="30" width="0.8" height="0.9" fill="#ffffff"/>')
+    design = build(svg(art, **BADGE_SIZE), multicolor=True)
     assert design.voids.is_empty
-    assert [body.fill for body in design.bodies] == ['#e63946']
+    assert sorted(body.fill for body in design.bodies) == ['#1d3557', '#e63946']
+    assert sum(region.geometry.area for region in design.regions) == pytest.approx(6000, abs=0.05)
 
 
 needs_openscad = pytest.mark.skipif(shutil.which('openscad') is None, reason='needs the OpenSCAD executable')

@@ -125,12 +125,22 @@ def fake_openscad(path, script):
     return path
 
 
+TETRAHEDRON_STL = 'solid t\n' + ''.join(
+    'facet normal 0 0 0\nouter loop\n' + ''.join(f'vertex {corner}\n' for corner in facet) + 'endloop\nendfacet\n'
+    for facet in (('0 0 0', '0 1 0', '1 0 0'), ('0 0 0', '1 0 0', '0 0 1'),
+                  ('0 0 0', '0 0 1', '0 1 0'), ('1 0 0', '0 1 0', '0 0 1'))
+) + 'endsolid t\n'
+WRITE_AN_STL = f"cat > \"$2\" <<'EOF'\n{TETRAHEDRON_STL}EOF\n"
+
+
 @needs_shell_scripts
 def test_render_stl_runs_openscad_with_output_then_input(workspace):
-    openscad = fake_openscad(workspace / 'openscad', 'echo "$1 $3" > "$2"\n')
+    openscad = fake_openscad(workspace / 'openscad', WRITE_AN_STL + 'echo "$@" > "$2.args"\n')
     log = []
     assert render_stl(workspace / 'pad.scad', workspace / 'pad.stl', openscad, log.append)
-    assert (workspace / 'pad.stl').read_text().split() == ['-o', str(workspace / 'pad.scad')]
+    assert (workspace / 'pad.stl.args').read_text().split() == [
+        '-o', str(workspace / 'pad.stl'), str(workspace / 'pad.scad'),
+    ]
     assert log == ['  STL file: pad.stl']
 
 
@@ -152,9 +162,9 @@ def test_render_stl_fails_when_openscad_writes_nothing(workspace):
 
 @needs_shell_scripts
 def test_render_stl_can_ask_for_one_body(workspace):
-    openscad = fake_openscad(workspace / 'openscad', 'echo "$@" > "$2"\n')
+    openscad = fake_openscad(workspace / 'openscad', WRITE_AN_STL + 'echo "$@" > "$2.args"\n')
     assert render_stl(workspace / 'pad.scad', workspace / 'pad.stl', openscad, lambda line: None, part=2)
-    assert (workspace / 'pad.stl').read_text().split() == [
+    assert (workspace / 'pad.stl.args').read_text().split() == [
         '-o', str(workspace / 'pad.stl'), '-D', 'part=2', str(workspace / 'pad.scad'),
     ]
 
@@ -163,22 +173,25 @@ def test_render_stl_can_ask_for_one_body(workspace):
 def test_render_stl_fails_when_openscad_leaves_a_shape_out(workspace):
     openscad = fake_openscad(
         workspace / 'openscad',
-        'echo solid > "$2"\necho "ERROR: The given mesh is not closed! Unable to convert." >&2\n',
+        WRITE_AN_STL + 'echo "ERROR: The given mesh is not closed! Unable to convert." >&2\n',
     )
     log = []
     assert not render_stl(workspace / 'pad.scad', workspace / 'pad.stl', openscad, log.append)
     assert log == ['  OpenSCAD left part of the model out: ERROR: The given mesh is not closed! Unable to convert.']
+    assert not (workspace / 'pad.stl').exists()
+
+
+@needs_shell_scripts
+def test_render_stl_fails_on_an_stl_with_nothing_in_it(workspace):
+    openscad = fake_openscad(workspace / 'openscad', 'printf "solid empty\\nendsolid empty\\n" > "$2"\n')
+    log = []
+    assert not render_stl(workspace / 'pad.scad', workspace / 'pad.stl', openscad, log.append)
+    assert any('wrote no STL' in line for line in log)
+    assert not (workspace / 'pad.stl').exists()
 
 
 TWO_TONE = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50">'
             '<rect width="60" height="50" fill="red"/><rect x="60" width="40" height="50" fill="blue"/></svg>')
-TETRAHEDRON_STL = 'solid t\n' + ''.join(
-    'facet normal 0 0 0\nouter loop\n' + ''.join(f'vertex {corner}\n' for corner in facet) + 'endloop\nendfacet\n'
-    for facet in (('0 0 0', '0 1 0', '1 0 0'), ('0 0 0', '1 0 0', '0 0 1'),
-                  ('0 0 0', '0 0 1', '0 1 0'), ('1 0 0', '0 1 0', '0 0 1'))
-) + 'endsolid t\n'
-
-
 @pytest.fixture
 def two_tone(workspace):
     (workspace / 'logo.svg').write_text(TWO_TONE)
@@ -190,7 +203,7 @@ def two_tone(workspace):
 @needs_shell_scripts
 def test_bodies_render_to_one_stl_each_and_pack_into_a_3mf(workspace, two_tone):
     design, scad_path = two_tone
-    openscad = fake_openscad(workspace / 'openscad', f"cat > \"$2\" <<'EOF'\n{TETRAHEDRON_STL}EOF\n")
+    openscad = fake_openscad(workspace / 'openscad', WRITE_AN_STL)
     log = []
     stl_paths = render_bodies(design, scad_path, openscad, log.append)
     assert {number: path.name for number, path in stl_paths.items()} == {
@@ -207,12 +220,15 @@ def test_bodies_render_to_one_stl_each_and_pack_into_a_3mf(workspace, two_tone):
 
 
 @needs_shell_scripts
-def test_body_rendering_stops_at_the_first_failure(workspace, two_tone):
+def test_body_rendering_stops_at_the_first_failure_and_leaves_no_stl(workspace, two_tone):
     design, scad_path = two_tone
-    openscad = fake_openscad(workspace / 'openscad', 'echo "$4" >> "$(dirname "$2")/calls"\nexit 1\n')
+    fails_on_the_second_body = (
+        WRITE_AN_STL + 'echo "$4" >> "$(dirname "$2")/calls"\n[ "$4" = "part=1" ] || exit 1\n'
+    )
+    openscad = fake_openscad(workspace / 'openscad', fails_on_the_second_body)
     assert render_bodies(design, scad_path, openscad, lambda line: None) is None
-    assert (workspace / 'out' / 'calls').read_text().split() == ['part=1']
-    assert not body_stl_path(scad_path, design.bodies[0]).exists()
+    assert (workspace / 'out' / 'calls').read_text().split() == ['part=1', 'part=2']
+    assert not any(body_stl_path(scad_path, body).exists() for body in design.bodies)
 
 
 def test_cached_design_keeps_its_bodies(workspace):

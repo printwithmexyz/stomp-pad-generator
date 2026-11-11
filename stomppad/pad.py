@@ -15,6 +15,7 @@ from .refine import (
     clean_regions,
     printability_warnings,
     scale_regions_to_mm,
+    similar_fill,
 )
 from .overlay import (
     polygon_parts,
@@ -166,7 +167,7 @@ class PadDesign:
         for region in self.regions:
             area_by_fill[region.fill] = area_by_fill.get(region.fill, 0.0) + region.geometry.area
         fills = sorted(area_by_fill, key=lambda fill: (-area_by_fill[fill], fill))
-        base_fill = self.settings.base_color or fills[0]
+        base_fill = _base_fill(fills, self.settings)
         tops = [fill for fill in fills if fill != base_fill]
         return [Body(1, base_fill, Polygon())] + [
             Body(number, fill, _tidy(robust_union([r.geometry for r in self.regions if r.fill == fill])))
@@ -209,6 +210,18 @@ class PadDesign:
         if len(self.bodies) > 1:
             lines.append('  Filaments: ' + ', '.join(body.label for body in self.bodies))
         return lines + [f'  NOTE: {warning}' for warning in self.warnings]
+
+
+def _base_fill(fills_by_area, settings):
+    """
+    The base body's color: the largest one unless base_color asks otherwise.
+    A base_color that cleanup would have merged into one of the art's colors
+    means that color, not an extra filament a shade away from it.
+    """
+    if settings.base_color is None:
+        return fills_by_area[0]
+    merged_into = similar_fill(settings.base_color, fills_by_area, settings.cleanup.color_tolerance)
+    return merged_into or settings.base_color
 
 
 def _ring_lists(geometry):
@@ -301,13 +314,12 @@ def build_pad(svg_file, settings=PadSettings(), logger=None):
     voids = snapped(_enclosed_holes(art), OUTPUT_STEP)
     packed = pack_regions(regions, settings.packing)
 
+    design = PadDesign(settings, regions, art, voids, packed, warnings)
     warnings += [warning.message for warning in printability_warnings(
         regions, settings.packing.pyramid_size, settings.packing.safety_margin,
-        base_color=settings.base_color,
+        base_color=design.bodies[0].fill,
     )]
     warnings += _assembly_notes(art, voids, settings)
-
-    design = PadDesign(settings, regions, art, voids, packed, warnings)
     if len(design.bodies) > 1 and settings.color_depth >= settings.base_thickness:
         warnings.append('Color depth is at least the base thickness, so colors run through the whole floor.')
     for line in design.describe():

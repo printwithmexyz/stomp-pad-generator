@@ -68,6 +68,12 @@ def test_stl_without_facets_is_an_error(data):
         read_stl(data)
 
 
+def test_stl_with_coordinates_that_are_not_numbers_is_an_error():
+    broken = ascii_stl(TETRAHEDRON).replace(b'vertex 1 0 0', b'vertex nan 0 0')
+    with pytest.raises(ValueError, match='not numbers'):
+        read_stl(broken)
+
+
 def test_3mf_holds_one_mesh_per_body_joined_into_one_object():
     files = unpack(write_3mf([mesh_body('1 base #111111', '#111111', 1), mesh_body('2 #ff0000', '#ff0000', 2, 5)]))
     assert list(files) == ['[Content_Types].xml', '_rels/.rels', '3D/3dmodel.model', 'Metadata/model_settings.config']
@@ -129,6 +135,12 @@ def test_names_with_markup_characters_survive():
     assert model.find(f"{CORE}metadata[@name='Title']").text == 'R&D <pad>'
     settings = ET.fromstring(files['Metadata/model_settings.config'])
     assert settings.find("object/part/metadata[@key='name']").get('value') == 'a "quoted" <name> & more'
+
+
+def test_control_characters_in_names_are_dropped():
+    files = unpack(write_3mf([mesh_body('bell\x07 name', '#000000', 1)], title='tab\x0bbed'))
+    assert model_objects(files)[0].get('name') == 'bell name'
+    assert ET.fromstring(files['Metadata/model_settings.config']).find("object/metadata[@key='name']").get('value') == 'tabbed'
 
 
 def test_same_bodies_give_the_same_bytes():

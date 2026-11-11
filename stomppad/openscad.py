@@ -3,6 +3,7 @@
 from shapely.geometry.polygon import orient
 
 from .overlay import polygon_parts
+from .refine import SMALLEST_DETAIL
 
 
 def _number(value):
@@ -85,6 +86,9 @@ recess_depth = {_number(settings.recess_depth)};
 // How far down from the floor surface each color other than the base reaches.
 color_depth = {_number(design.color_depth)};
 color_bodies = [{', '.join(str(number) for number in color_bodies)}];
+// Each color is grown this much, so neighbours overlap by a hair. An exact
+// fit would leave slivers of base wherever two outlines differ in the last decimal.
+color_overlap = {_number(SMALLEST_DETAIL / 2)};
 
 total_height = base_thickness + outline_height;
 
@@ -110,16 +114,11 @@ module recess_2d() {{
     offset(delta = 0.01) voids_2d();
 }}
 
-// The floor area a color body owns. Grown 0.001 so neighbouring colors overlap
-// by a hair instead of leaving a sliver of base between them, then clipped so
-// it never reaches into the rim or a recess.
+// The floor area a color body owns, clipped so it never reaches into the rim.
 module color_top_2d(body) {{
-    difference() {{
-        intersection() {{
-            art_2d();
-            offset(delta = 0.001) color_2d(body);
-        }}
-        if (recess_voids) recess_2d();
+    intersection() {{
+        art_2d();
+        offset(delta = color_overlap) color_2d(body);
     }}
 }}
 
@@ -146,11 +145,9 @@ module pad_blank(without_color_tops) {{
         if (recess_voids)
             translate([0, 0, base_thickness - recess_depth])
                 linear_extrude(height = total_height) recess_2d();
-        // Starts below the pad when colors run through the whole floor, so the
-        // cut never ends flush with the underside.
         if (without_color_tops)
-            translate([0, 0, color_depth < base_thickness ? base_thickness - color_depth : -1])
-                linear_extrude(height = total_height + 1)
+            translate([0, 0, base_thickness - color_depth])
+                linear_extrude(height = total_height)
                     for (body = color_bodies) color_top_2d(body);
     }}
 }}

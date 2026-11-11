@@ -33,6 +33,7 @@ from shapely.geometry.polygon import orient
 GRID_FRACTION = 1e-7   # snap grid, as a fraction of the geometry's extent
 ARC_FRACTION = 2e-5    # how far a rounded corner may stray from a true arc, same basis
 ARC_TOLERANCE = ARC_FRACTION / GRID_FRACTION  # the same, in grid steps
+CLIPPER_SAFE_RANGE = 1e15  # Clipper aborts the process a little past 4e18
 
 CLIPPER_JOINS = {
     'round': pyclipper.JT_ROUND,
@@ -139,7 +140,9 @@ def snapped(geometry, step):
     ring left touching or crossing itself at that resolution. A shape written
     out at a fixed number of decimals is then exactly the shape that was built.
     """
-    if not _is_finite(geometry):
+    if not _is_finite(geometry) or geometry.is_empty:
+        return Polygon()
+    if np.abs(shapely.total_bounds([geometry])).max() / step > CLIPPER_SAFE_RANGE:
         return Polygon()
     grid = _IntegerGrid((0.0, 0.0), step)
     return grid.even_odd_area(grid.ring_paths(geometry))

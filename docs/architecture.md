@@ -44,14 +44,15 @@ unless `base_color` says otherwise, so a four-color logo needs four
 filaments, not five.
 
 The `.scad` has a `part` variable. `part = 0` is the whole pad as one solid.
-`-D part=N` renders body N alone. Color bodies are grown 0.001 mm so that
-neighbours overlap by a hair: an exact fit would leave slivers of base
-between them wherever two outlines disagree in the last decimal.
+`-D part=N` renders body N alone. Color bodies are grown 0.005 mm
+(`color_overlap`) so that neighbours overlap by a hair: an exact fit would
+leave slivers of base between them wherever two outlines disagree in the
+last decimal. Cleanup leaves no gap between colors wider than twice that.
 
 `threemf.py` turns the rendered body STLs into a 3MF: one mesh object per
 body, joined by a components object, plus `Metadata/model_settings.config`,
-which is where Bambu Studio and OrcaSlicer read each part's filament slot
-(`extruder`) from. The layout follows Bambu Studio's importer
+which is where Bambu Studio reads each part's filament slot (`extruder`)
+from. The layout follows Bambu Studio's importer
 (`src/libslic3r/Format/bbs_3mf.cpp`), read at commit `930fe93`. Standard 3MF
 colors are off by default because recent Bambu Studio versions respond to
 them by opening a color-matching dialog and discarding the filament slots.
@@ -69,8 +70,9 @@ remain. Two defences:
   precision the file is written at. Set operations leave specks that small
   along every seam, so any new shape written into the `.scad` needs the same
   treatment.
-- `batch.render_stl` fails the render when OpenSCAD's log has an `ERROR:`
-  line. The web renderer does not check yet.
+- `batch.render_stl` fails the render, and deletes the STL, when OpenSCAD's
+  log has an `ERROR:` line or the STL has no facets. The web renderer does
+  not check yet.
 
 ### GEOS errors and Pyodide
 
@@ -94,8 +96,8 @@ as the grid itself ("side location conflict"). Shapes that have been through
 a cleanup radius have none. Shapes stitched together from the scraps of
 other set operations do, so they go through `without_specks` (Clipper) before
 GEOS sees them again, and questions about such scraps are answered with
-point-in-polygon tests, not overlays. Five of 720 real icons threw until
-`refine._absorb_enclosed` was written that way.
+point-in-polygon tests, not overlays. Five of 720 real icons threw in
+`refine._absorb_enclosed` until it was written that way.
 
 New geometry code must go through `overlay.py` instead of calling `.union()`,
 `.difference()`, `.intersection()`, `.buffer()`, `.simplify()` or

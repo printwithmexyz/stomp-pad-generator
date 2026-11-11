@@ -1,5 +1,6 @@
 """Scale parsed regions to millimetres, clean them up, and flag what won't print well."""
 
+import math
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -74,6 +75,15 @@ def _channels(fill):
     return tuple(int(fill[i:i + 2], 16) for i in (1, 3, 5))
 
 
+def similar_fill(fill, candidates, tolerance):
+    """The first candidate within tolerance of fill on every channel, or None."""
+    return next(
+        (candidate for candidate in candidates
+         if max(abs(a - b) for a, b in zip(_channels(candidate), _channels(fill))) <= tolerance),
+        None,
+    )
+
+
 def merge_similar_fills(regions, tolerance):
     """Fold near-identical fills (#000000 vs #010102) into the one covering more area."""
     area_by_fill = {}
@@ -82,11 +92,7 @@ def merge_similar_fills(regions, tolerance):
 
     kept, remap = [], {}
     for fill in sorted(area_by_fill, key=area_by_fill.get, reverse=True):
-        match = next(
-            (k for k in kept
-             if max(abs(a - b) for a, b in zip(_channels(k), _channels(fill))) <= tolerance),
-            None,
-        )
+        match = similar_fill(fill, kept, tolerance)
         remap[fill] = match or fill
         if match is None:
             kept.append(fill)
@@ -149,39 +155,56 @@ def _outline_samples(polygon, spacing, offset):
     return np.vstack(points), np.concatenate(lengths)
 
 
-def _absorb_enclosed(painted, cleaned_by_fill, reach):
+def _removed_between_colors(painted, kept, settings):
     """
-    Hand each removed piece that kept colors surround to the color it borders
-    most. Left alone, a hairline between two colors would show the base color
-    and a speck inside a color would become a hole through the pad. Pieces on
-    the outer edge stay removed: those are what cleanup is for.
+    The pieces cleanup removed from where kept colors face each other across
+    a gap too small to print. Whatever it removed from the outer edge is not
+    among them, even where a sliver runs on past the colors it separates.
     """
-    fills = list(cleaned_by_fill)
-    if not fills:
-        return cleaned_by_fill
-    kept = robust_union(cleaned_by_fill.values())
-    pieces = polygon_parts(robust_difference(painted, kept))
-    if not pieces:
-        return cleaned_by_fill
+    reach = max(settings.min_feature / 2, math.sqrt(settings.min_area / math.pi))
+    closed = robust_buffer(robust_buffer(kept, reach, 'mitre'), -reach, 'mitre')
+    gaps = without_specks(robust_difference(closed, kept), SMALLEST_DETAIL)
+    return polygon_parts(robust_intersection(gaps, painted))
 
-    # Which color lies just outside each stretch of each piece's outline.
-    # Point tests, because the pieces are scraps too fine for an overlay.
-    sampled = [_outline_samples(piece, spacing=reach, offset=reach / 4) for piece in pieces]
+
+def _bordering_lengths(pieces, geometry_by_fill, spacing):
+    """
+    How much of each piece's outline each color lies along, as a
+    (colors, pieces) array, plus each piece's whole outline length. Measured
+    with point tests, because the pieces are scraps too fine for an overlay.
+    """
+    sampled = [_outline_samples(piece, spacing, offset=spacing / 4) for piece in pieces]
     points = np.vstack([points for points, _ in sampled])
     lengths = np.concatenate([lengths for _, lengths in sampled])
     piece_of = np.repeat(np.arange(len(pieces)), [len(lengths) for _, lengths in sampled])
     bordered = []
-    for fill in fills:
-        shapely.prepare(cleaned_by_fill[fill])
-        touching = shapely.contains_xy(cleaned_by_fill[fill], points[:, 0], points[:, 1])
+    for geometry in geometry_by_fill.values():
+        shapely.prepare(geometry)
+        touching = shapely.contains_xy(geometry, points[:, 0], points[:, 1])
         bordered.append(np.bincount(piece_of, lengths * touching, minlength=len(pieces)))
-    bordered = np.array(bordered)
-    outline = np.bincount(piece_of, lengths, minlength=len(pieces))
+    return np.array(bordered), np.bincount(piece_of, lengths, minlength=len(pieces))
+
+
+def _absorb_enclosed(painted, cleaned_by_fill, settings):
+    """
+    Hand each removed piece that kept colors surround to the color it borders
+    most. Left alone, a hairline between two colors would show the base color
+    and a speck where colors meet would become a hole through the pad.
+    """
+    if not cleaned_by_fill:
+        return cleaned_by_fill
+    kept = robust_union(cleaned_by_fill.values())
+    pieces = _removed_between_colors(painted, kept, settings)
+    if not pieces:
+        return cleaned_by_fill
+
+    spacing = max(settings.min_feature / 2, SMALLEST_DETAIL)
+    bordered, outline = _bordering_lengths(pieces, cleaned_by_fill, spacing)
     enclosed = (outline > 0) & (bordered.sum(axis=0) >= ENCLOSED_FRACTION * outline)
     winners = bordered.argmax(axis=0)
 
     absorbed = dict(cleaned_by_fill)
-    for index, fill in enumerate(fills):
+    for index, fill in enumerate(cleaned_by_fill):
         won = [piece for piece, keep in zip(pieces, enclosed & (winners == index)) if keep]
         if won:
             absorbed[fill] = without_specks(
@@ -193,10 +216,11 @@ def _absorb_enclosed(painted, cleaned_by_fill, reach):
 def clean_regions(regions, settings=CleanupSettings()):
     """
     Merge near-duplicate fills, smooth traced edges, and drop slivers, specks
-    and pinholes too small to print. Expects millimetres. Colors never
-    overlap afterwards: where edges were smoothed past each other, the color
-    cleaned first keeps the overlap. Removed detail that other colors
-    surround is absorbed by a neighbour, so it leaves no gap.
+    and pinholes too small to print. Expects millimetres. Colors do not
+    overlap afterwards by more than a few thousandths of a square millimetre:
+    where edges were smoothed past each other, the color cleaned first keeps
+    the overlap. Removed detail that other colors surround is absorbed by a
+    neighbour, so it leaves no gap.
     Returns (regions, notes) where notes describe what was removed.
     """
     merged = merge_similar_fills(regions, settings.color_tolerance)
@@ -215,9 +239,7 @@ def clean_regions(regions, settings=CleanupSettings()):
             cleaned = _printable_pieces(robust_difference(cleaned, taken), settings)
         if not cleaned.is_empty:
             cleaned_by_fill[fill] = cleaned
-    absorbed_by_fill = _absorb_enclosed(
-        robust_union(painted_by_fill.values()), cleaned_by_fill, settings.min_feature / 2,
-    )
+    absorbed_by_fill = _absorb_enclosed(robust_union(painted_by_fill.values()), cleaned_by_fill, settings)
     # Joining a piece to its neighbour can leave pinholes along the seam.
     cleaned_by_fill = {
         fill: _printable_pieces(geometry, settings) for fill, geometry in absorbed_by_fill.items()
@@ -226,8 +248,9 @@ def clean_regions(regions, settings=CleanupSettings()):
     for fill, geometry in painted_by_fill.items():
         if fill not in cleaned_by_fill:
             notes.append(f'Removed {fill} entirely: every piece was too small to print.')
-        elif geometry.area - cleaned_by_fill[fill].area > settings.min_area:
-            removed_area = geometry.area - cleaned_by_fill[fill].area
+            continue
+        removed_area = geometry.area - cleaned_by_fill[fill].area
+        if removed_area > settings.min_area:
             notes.append(f'Trimmed {removed_area:.1f} mm^2 of unprintable detail from {fill}.')
     return regions_from_fills(cleaned_by_fill), notes
 

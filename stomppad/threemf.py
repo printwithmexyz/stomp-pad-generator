@@ -4,7 +4,7 @@ import io
 import re
 import struct
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from xml.sax.saxutils import escape, quoteattr
 
 import numpy as np
@@ -66,6 +66,8 @@ def read_stl(data):
     tells a slicer the facets are joined.
     """
     corners = _stl_corners(data)
+    if not np.isfinite(corners).all():
+        raise ValueError('STL has coordinates that are not numbers.')
     vertices, index = np.unique(corners.reshape(-1, 3), axis=0, return_inverse=True)
     triangles = np.asarray(index).reshape(-1, 3)
     flat = (
@@ -77,6 +79,15 @@ def read_stl(data):
     if not len(triangles):
         raise ValueError('STL has no facets.')
     return vertices, triangles
+
+
+def count_stl_facets(data):
+    return len(_stl_corners(data))
+
+
+def _printable(text):
+    """Without control characters, which XML cannot carry even when escaped."""
+    return ''.join(character for character in text if character.isprintable())
 
 
 def _mesh_xml(body, object_id, with_color):
@@ -128,9 +139,9 @@ def _model_xml(bodies, title, standard_colors):
 
 def _bambu_settings_xml(bodies, title):
     """
-    What Bambu Studio and OrcaSlicer read part names and filaments from. A
-    part's id is the id of its mesh object in the model file, and "extruder"
-    is the filament slot.
+    What Bambu Studio reads part names and filaments from. A part's id is the
+    id of its mesh object in the model file, and "extruder" is the filament
+    slot.
     """
     pad_id = FIRST_MESH_ID + len(bodies)
     parts = ''.join(
@@ -158,15 +169,15 @@ def write_3mf(bodies, title='Stomp pad', standard_colors=False):
     3MF bytes for one object made of a part per body.
 
     Any slicer opens it as plain parts named after their colors. Bambu Studio
-    and OrcaSlicer also read each part's filament slot from
-    Metadata/model_settings.config, so the colors land on the right filaments
-    without assigning them by hand.
+    also reads each part's filament slot from Metadata/model_settings.config,
+    so the colors land on the right filaments without assigning them by hand.
 
     standard_colors adds each part's color the way the 3MF core spec defines
     it, for viewers and other slicers. Recent Bambu Studio versions then open
     their color-matching dialog and ignore the filament slots.
     """
-    bodies = list(bodies)
+    bodies = [replace(body, name=_printable(body.name)) for body in bodies]
+    title = _printable(title)
     if not bodies:
         raise ValueError('A 3MF needs at least one body.')
     files = {

@@ -178,6 +178,8 @@ def test_snapping_puts_every_corner_on_the_grid_and_drops_what_collapses():
     result = snapped(wobbly, 1e-4)
     assert result.equals(box(0, 0, 10, 10))
     assert snapped(Polygon([(0, 0), (math.nan, 1), (1, 1)]), 1e-4).is_empty
+    assert snapped(Polygon(), 1e-4).is_empty
+    assert snapped(box(1e14, 1e14, 1e14 + 10, 1e14 + 10), 1e-4).is_empty  # past what Clipper can hold
 
 
 @pytest.mark.parametrize('tolerance', [0.05, 0.3])
@@ -784,13 +786,56 @@ def test_hairline_between_two_colors_goes_to_a_neighbour():
     assert any('#000000' in note for note in notes)
 
 
-def test_speck_inside_a_color_is_absorbed_instead_of_leaving_a_hole():
-    speck = box(10, 10, 10.6, 10.6)
-    regions = [Region(0, '#ff0000', box(0, 0, 20, 20).difference(speck)), Region(1, '#ffffff', speck)]
+def test_slit_inside_a_color_is_absorbed_by_it_and_not_by_a_color_elsewhere():
+    slit = box(10, 5, 10.3, 11)  # too thin to print, too big to count as a pinhole
+    regions = [
+        Region(0, '#0000ff', box(40, 0, 70, 30)),
+        Region(1, '#ff0000', box(0, 0, 20, 20).difference(slit)),
+        Region(2, '#ffffff', slit),
+    ]
     cleaned, _ = clean_regions(regions)
-    assert [region.fill for region in cleaned] == ['#ff0000']
-    assert len(cleaned[0].geometry.interiors) == 0
-    assert cleaned[0].geometry.area == pytest.approx(400, abs=0.01)
+    blue, red = (region.geometry for region in cleaned)
+    assert [region.fill for region in cleaned] == ['#0000ff', '#ff0000']
+    assert len(red.interiors) == 0
+    assert red.area == pytest.approx(400, abs=0.01)
+    assert blue.area == pytest.approx(900, abs=0.01)
+
+
+def test_hairline_running_past_the_colors_it_separates_is_absorbed_between_them():
+    regions = [
+        Region(0, '#ff0000', box(0, 0, 20, 20)),
+        Region(1, '#000000', box(20, -5, 20.3, 25)),
+        Region(2, '#0000ff', box(20.3, 0, 40, 20)),
+    ]
+    cleaned, _ = clean_regions(regions)
+    covered = robust_union([region.geometry for region in cleaned])
+    assert covered.symmetric_difference(box(0, 0, 40, 20)).area < 0.01
+
+
+def test_piece_goes_to_the_color_it_borders_most():
+    notch = box(19.7, 5, 20, 15)  # red on three sides, blue along one
+    regions = [
+        Region(0, '#ff0000', box(0, 0, 20, 20).difference(notch)),
+        Region(1, '#0000ff', box(20, 0, 40, 20)),
+        Region(2, '#ffffff', notch),
+    ]
+    cleaned, _ = clean_regions(regions)
+    red, blue = (region.geometry for region in cleaned)
+    assert red.area == pytest.approx(400, abs=0.01)
+    assert blue.area == pytest.approx(400, abs=0.01)
+
+
+def test_thin_wall_between_two_holes_in_one_color_stays_removed():
+    wall = box(9.85, 5, 10.15, 15)
+    plate = box(0, 0, 20, 20).difference(box(4, 5, 9.85, 15)).difference(box(10.15, 5, 16, 15))
+    cleaned, _ = clean_regions([Region(0, '#ff0000', plate)])
+    assert cleaned[0].geometry.intersection(wall.buffer(-0.05)).area < SNAP_NOISE
+
+
+def test_cleanup_with_no_minimum_feature_still_runs():
+    regions = [Region(0, '#ff0000', box(0, 0, 20, 20)), Region(1, '#0000ff', box(20, 0, 40, 20))]
+    cleaned, _ = clean_regions(regions, CleanupSettings(min_feature=0))
+    assert sum(region.geometry.area for region in cleaned) == pytest.approx(800, abs=0.01)
 
 
 def test_sliver_on_the_outer_edge_is_not_absorbed():
@@ -805,8 +850,11 @@ def test_colors_that_shared_a_curved_edge_still_meet_after_smoothing():
     regions = [Region(0, '#ff0000', disc), Region(1, '#0000ff', box(-20, -20, 20, 20).difference(disc))]
     cleaned, _ = clean_regions(regions, CleanupSettings(simplify_tolerance=0.3))
     red, blue = (region.geometry for region in cleaned)
-    assert robust_union([red, blue]).area == pytest.approx(1600, abs=0.01)
-    assert red.intersection(blue).area < SNAP_NOISE
+    # Gaps under 0.01 mm wide are left for the color overlap in the .scad to cover.
+    assert robust_union([red, blue]).area == pytest.approx(1600, abs=0.1)
+    overlapped = robust_union([robust_buffer(red, 0.005), robust_buffer(blue, 0.005)])
+    assert robust_intersection(overlapped, box(-20, -20, 20, 20)).area == pytest.approx(1600, abs=0.01)
+    assert red.intersection(blue).area < 0.01
     assert len(blue.interiors) == 1
 
 

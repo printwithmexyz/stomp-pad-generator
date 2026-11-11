@@ -13,7 +13,7 @@ from .packing import PackedRegion, pyramid_footprints
 from .pad import PadDesign, build_pad
 from .overlay import polygon_parts
 from .svg_parse import Region
-from .threemf import pad_3mf
+from .threemf import count_stl_facets, pad_3mf
 
 CACHE_VERSION = 3  # bump whenever the pipeline can produce a different design for the same input
 STL_RENDER_TIMEOUT_SECONDS = 300
@@ -141,21 +141,28 @@ def render_stl(scad_path, stl_path, openscad_path, log=print, part=None):
     except OSError as error:
         log(f'  STL render error: {error}')
         return False
-    if result.returncode != 0:
-        log(f'  OpenSCAD error: {result.stderr.strip()}')
+    stl_path = Path(stl_path)
+    problem = _render_problem(result, stl_path)
+    if problem:
+        log(f'  {problem}')
+        stl_path.unlink(missing_ok=True)
         return False
+    log(f'  STL file: {stl_path.name}')
+    return True
+
+
+def _render_problem(result, stl_path):
+    """Why an OpenSCAD run did not produce a usable STL, or None if it did."""
+    if result.returncode != 0:
+        return f'OpenSCAD error: {result.stderr.strip()}'
     # OpenSCAD exits cleanly after leaving a shape it could not process out of
     # the model, so the STL exists but is missing material.
     dropped = [line for line in result.stderr.splitlines() if line.startswith('ERROR:')]
     if dropped:
-        log(f'  OpenSCAD left part of the model out: {dropped[0]}')
-        return False
-    stl_path = Path(stl_path)
-    if not stl_path.exists() or stl_path.stat().st_size == 0:
-        log(f'  OpenSCAD finished but wrote no STL. {result.stderr.strip()}')
-        return False
-    log(f'  STL file: {stl_path.name}')
-    return True
+        return f'OpenSCAD left part of the model out: {dropped[0]}'
+    if not stl_path.exists() or count_stl_facets(stl_path.read_bytes()) == 0:
+        return f'OpenSCAD finished but wrote no STL. {result.stderr.strip()}'
+    return None
 
 
 def body_stl_path(scad_path, body):
@@ -167,12 +174,14 @@ def body_stl_path(scad_path, body):
 def render_bodies(design, scad_path, openscad_path, log=print):
     """
     Render one STL per body next to the .scad. Returns {body number: path},
-    or None if any render failed.
+    or None if any render failed, in which case no STL is left behind.
     """
     paths = {}
     for body in design.bodies:
         stl_path = body_stl_path(scad_path, body)
         if not render_stl(scad_path, stl_path, openscad_path, log, part=body.number):
+            for rendered in paths.values():
+                rendered.unlink()
             return None
         paths[body.number] = stl_path
     return paths
