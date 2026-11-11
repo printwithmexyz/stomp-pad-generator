@@ -27,7 +27,7 @@ manifest, so the browser and desktop never drift.
 | `packing.py` | medial-axis centerline and hex-packed pyramid placement |
 | `pad.py` | `PadSettings`, `PadDesign`, `build_pad`: the pipeline end to end |
 | `openscad.py` | a design as `.scad` text with inline polygons (no SVG import) |
-| `overlay.py` | every union, difference, intersection and offset, done so none can raise |
+| `overlay.py` | every union, difference, intersection, offset, simplify and repair, done so none can raise |
 | `batch.py` | desktop only: files on disk, cache, STL render, debug picture |
 
 Python owns all geometry. OpenSCAD only extrudes and subtracts the polygons
@@ -42,13 +42,23 @@ at lower precision. So `overlay.py` never gives GEOS the chance:
 
 - union, difference and intersection run on a fixed-precision grid, the GEOS
   mode that is robust by construction;
-- offsets (grow, shrink, stroke outlines) are done by Clipper (`pyclipper`),
-  the integer library slicers use, not by GEOS `buffer`.
+- offsets (grow, shrink, stroke outlines) and repairs of invalid shapes are
+  done by Clipper (`pyclipper`), the integer library slicers use, not by GEOS
+  `buffer` or `make_valid`;
+- simplification is a Douglas-Peucker pass written here, not GEOS `simplify`.
+  The GEOS topology-preserving simplifier walks its lines in an order that
+  depends on memory addresses, so it crashed on one logo only when that logo
+  was processed inside a batch.
 
 New geometry code must go through `overlay.py` instead of calling `.union()`,
-`.difference()`, `.intersection()` or `.buffer()` on a shape. The same goes
-for building geometry from numbers that could be NaN, such as the bounds of
-an empty shape: GEOS rejects those with an exception too.
+`.difference()`, `.intersection()`, `.buffer()`, `.simplify()` or
+`make_valid` on a shape. The same goes for building geometry from numbers
+that could be NaN, such as the bounds of an empty shape: GEOS rejects those
+with an exception too.
+
+A clean run proves less than it seems here, because one of these failures
+was not repeatable. When touching `overlay.py`, run a few hundred real SVGs
+through `build_pad` inside Pyodide more than once.
 
 ## Logger callback pattern
 

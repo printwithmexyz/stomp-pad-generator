@@ -51,8 +51,9 @@ both interfaces benefit immediately. The web project re-syncs the package on
 every `npm run dev` / `npm run build`, so no manual copying.
 
 Run the tests with `python -m pytest` (needs `pytest`). Do unions,
-differences, intersections and buffers only through `stomppad/overlay.py`;
-the reason is in [docs/architecture.md](docs/architecture.md).
+differences, intersections, buffers and simplification only through
+`stomppad/overlay.py`; the reason is in
+[docs/architecture.md](docs/architecture.md).
 
 When changing a function signature, audit both call sites:
 
