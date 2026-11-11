@@ -9,11 +9,12 @@ kills the whole runtime and the page has to be reloaded.
 So nothing here gives GEOS the chance to throw:
 
 - Union, difference and intersection run on a fixed-precision grid, the GEOS
-  mode that is robust by construction. They only need valid input, which
-  they repair if they have to.
-- Buffers do not use GEOS at all. GEOS has no exception-free buffer, and with
-  it about 3 in 100 real logos killed the runtime. Offsetting is done by
-  Clipper, the integer library slicers use, which cannot fail that way.
+  mode that is robust by construction. They only need valid input.
+- Offsetting, simplifying and repairing invalid shapes do not use GEOS at
+  all. Its buffer, its topology-preserving simplifier and make_valid can all
+  throw (the simplifier does so depending on memory layout, so the same file
+  may pass alone and fail in a batch). Clipper, the integer library slicers
+  use, does those jobs and cannot fail that way.
 """
 
 import math
@@ -52,6 +53,70 @@ def _is_finite(geometry):
     return bool(np.isfinite(shapely.get_coordinates(geometry)).all())
 
 
+class _IntegerGrid:
+    """
+    Maps coordinates to and from the integers Clipper works in. Clipper aborts
+    the whole process outside its range, so the grid is anchored at the
+    shape's own corner: the largest value is then about 1 / GRID_FRACTION
+    however far the shape is from the origin.
+    """
+
+    def __init__(self, bounds, extent):
+        self.origin = np.array(bounds[:2])
+        self.extent = extent
+        self.scale = 1 / (extent * GRID_FRACTION)
+
+    @classmethod
+    def around(cls, geometry, reach=0.0):
+        """A grid sized to the geometry and anything within reach of it, or None if that is a point."""
+        min_x, min_y, max_x, max_y = shapely.total_bounds([geometry])
+        extent = max(max_x - min_x, max_y - min_y, abs(reach))
+        if not (math.isfinite(extent) and extent > 0 and math.isfinite(1 / (extent * GRID_FRACTION))):
+            return None
+        return cls((min_x, min_y), extent)
+
+    def to_grid(self, points):
+        return np.round((np.asarray(points)[:, :2] - self.origin) * self.scale).astype(np.int64)
+
+    def from_grid(self, contour):
+        return np.array(contour) / self.scale + self.origin
+
+    def ring_paths(self, geometry):
+        """Every polygon ring as an integer path, shells and holes wound opposite ways."""
+        paths = []
+        for polygon in polygon_parts(geometry):
+            polygon = orient(polygon)
+            for ring in (polygon.exterior, *polygon.interiors):
+                paths.append(self.to_grid(ring.coords[:-1]).tolist())
+        return paths
+
+    def polygons(self, tree):
+        """Clipper's result tree alternates shells and holes level by level."""
+        found = []
+        for shell in tree.Childs:
+            holes = [self.from_grid(hole.Contour) for hole in shell.Childs if len(hole.Contour) >= 3]
+            if len(shell.Contour) >= 3:
+                found.append(Polygon(self.from_grid(shell.Contour), holes))
+            for hole in shell.Childs:
+                found.extend(self.polygons(hole))
+        return found
+
+    def even_odd_area(self, paths):
+        """The area the paths enclose an odd number of times, as clean polygons."""
+        paths = [path for path in paths if len(path) >= 3]
+        if not paths:
+            return Polygon()
+        clipper = pyclipper.Pyclipper()
+        clipper.StrictlySimple = True
+        try:
+            clipper.AddPaths(paths, pyclipper.PT_SUBJECT, True)
+        except pyclipper.ClipperException:  # every path was flat
+            return Polygon()
+        tree = clipper.Execute2(pyclipper.CT_UNION, pyclipper.PFT_EVENODD, pyclipper.PFT_EVENODD)
+        polygons = self.polygons(tree)
+        return polygons[0] if len(polygons) == 1 else MultiPolygon(polygons)
+
+
 def _repaired(geometry):
     # GEOS throws on NaN and infinite coordinates even in is_valid, so a shape
     # that has any is treated as nothing at all.
@@ -59,7 +124,8 @@ def _repaired(geometry):
         return Polygon()
     if shapely.is_valid(geometry):
         return geometry
-    return MultiPolygon(polygon_parts(shapely.make_valid(geometry)))
+    grid = _IntegerGrid.around(geometry)
+    return grid.even_odd_area(grid.ring_paths(geometry)) if grid else Polygon()
 
 
 def _on_a_grid(geometries):
@@ -88,33 +154,69 @@ def robust_intersection(geometry, other):
     return shapely.intersection(geometry, other, grid_size=grid_size)
 
 
-def _clipper_paths(geometry, closed):
-    """(points, closed, is_line) for every ring or line Clipper should offset."""
-    if geometry.geom_type in ('LineString', 'LinearRing', 'MultiLineString'):
-        for line in getattr(geometry, 'geoms', [geometry]):
-            points = np.asarray(line.coords)
-            line_closed = line.is_closed if closed is None else closed
-            if line_closed and len(points) > 1 and (points[0] == points[-1]).all():
-                points = points[:-1]
-            yield points, line_closed, True
-        return
-    for polygon in polygon_parts(geometry):
-        # Clipper tells shells from holes by winding direction.
-        polygon = orient(polygon)
-        for ring in (polygon.exterior, *polygon.interiors):
-            yield np.asarray(ring.coords)[:-1], True, False
+def _kept_by_douglas_peucker(points, tolerance):
+    """Which points of an open polyline survive Douglas-Peucker simplification."""
+    keep = np.zeros(len(points), dtype=bool)
+    keep[[0, -1]] = True
+    pending = [(0, len(points) - 1)]
+    while pending:
+        start, end = pending.pop()
+        if end - start < 2:
+            continue
+        chord = points[end] - points[start]
+        offsets = points[start + 1:end] - points[start]
+        chord_length = np.hypot(*chord)
+        if chord_length == 0:
+            distances = np.hypot(offsets[:, 0], offsets[:, 1])
+        else:
+            distances = np.abs(chord[0] * offsets[:, 1] - chord[1] * offsets[:, 0]) / chord_length
+        farthest = int(np.argmax(distances))
+        if distances[farthest] > tolerance:
+            middle = start + 1 + farthest
+            keep[middle] = True
+            pending += [(start, middle), (middle, end)]
+    return keep
 
 
-def _polygons_from_tree(node, from_grid):
-    """Clipper's result tree alternates shells and holes level by level."""
-    polygons = []
-    for shell in node.Childs:
-        holes = [from_grid(hole.Contour) for hole in shell.Childs if len(hole.Contour) >= 3]
-        if len(shell.Contour) >= 3:
-            polygons.append(Polygon(from_grid(shell.Contour), holes))
-        for hole in shell.Childs:
-            polygons.extend(_polygons_from_tree(hole, from_grid))
-    return polygons
+def _simplified_ring(points, tolerance):
+    """A closed ring (first point not repeated) with stair-steps under tolerance removed."""
+    opposite = int(np.argmax(np.hypot(*(points - points[0]).T)))
+    if opposite == 0:
+        return points[:1]
+    there = points[:opposite + 1]
+    back = np.vstack([points[opposite:], points[:1]])
+    return np.vstack([
+        there[_kept_by_douglas_peucker(there, tolerance)][:-1],
+        back[_kept_by_douglas_peucker(back, tolerance)][:-1],
+    ])
+
+
+def robust_simplify(geometry, tolerance):
+    """
+    Remove vertices that move the outline by less than tolerance. Rings are
+    simplified one at a time, so any that end up crossing are untangled.
+    """
+    grid = _IntegerGrid.around(geometry) if _is_finite(geometry) else None
+    if grid is None:
+        return Polygon()
+    if tolerance <= 0:
+        return geometry
+    rings = [
+        _simplified_ring(np.asarray(ring.coords)[:-1], tolerance)
+        for polygon in polygon_parts(geometry)
+        for ring in (polygon.exterior, *polygon.interiors)
+    ]
+    return grid.even_odd_area([grid.to_grid(ring).tolist() for ring in rings])
+
+
+def _lines(geometry, closed):
+    """(points, closed) for every line in a line geometry."""
+    for line in getattr(geometry, 'geoms', [geometry]):
+        points = np.asarray(line.coords)
+        line_closed = line.is_closed if closed is None else closed
+        if line_closed and len(points) > 1 and (points[0] == points[-1]).all():
+            points = points[:-1]
+        yield points, line_closed
 
 
 def robust_buffer(geometry, distance, join_style='round', cap_style='round', mitre_limit=5.0,
@@ -131,35 +233,30 @@ def robust_buffer(geometry, distance, join_style='round', cap_style='round', mit
     """
     if not (_is_finite(geometry) and math.isfinite(distance)):
         return Polygon()
-    min_x, min_y, max_x, max_y = shapely.total_bounds([geometry])
     # A zero-length line still has a size once it is given thickness.
-    extent = max(max_x - min_x, max_y - min_y, abs(distance))
-    scale = 1 / (extent * GRID_FRACTION) if extent > 0 else math.inf
-    if not math.isfinite(scale):
+    grid = _IntegerGrid.around(geometry, reach=distance)
+    if grid is None:
         return Polygon()
 
-    # Clipper works in integers and aborts the process outside its range, so
-    # the grid is anchored at the shape's own corner. The largest value is
-    # then about 1 / GRID_FRACTION however far the shape is from the origin.
-    origin = np.array([min_x, min_y])
+    join = CLIPPER_JOINS[join_style]
     offsetter = pyclipper.PyclipperOffset(
-        miter_limit=mitre_limit, arc_tolerance=extent * ARC_FRACTION * scale,
+        miter_limit=mitre_limit, arc_tolerance=grid.extent * ARC_FRACTION * grid.scale,
     )
-    for points, path_closed, is_line in _clipper_paths(geometry, closed):
-        path = np.round((points[:, :2] - origin) * scale).astype(np.int64)
-        join, end_type = CLIPPER_JOINS[join_style], pyclipper.ET_CLOSEDPOLYGON
-        if is_line:
-            end_type = pyclipper.ET_CLOSEDLINE if path_closed else CLIPPER_CAPS[cap_style]
+    if geometry.geom_type in ('LineString', 'LinearRing', 'MultiLineString'):
+        for points, line_closed in _lines(geometry, closed):
+            path = grid.to_grid(points)
+            line_join = join
             if (path == path[0]).all():
                 # A dot: SVG draws its cap and nothing else, and Clipper
                 # shapes a lone point by its join.
                 if cap_style == 'flat':
                     continue
-                join = CLIPPER_JOINS['round' if cap_style == 'round' else 'bevel']
-        offsetter.AddPath(path.tolist(), join, end_type)
+                line_join = CLIPPER_JOINS['round' if cap_style == 'round' else 'bevel']
+            end_type = pyclipper.ET_CLOSEDLINE if line_closed else CLIPPER_CAPS[cap_style]
+            offsetter.AddPath(path.tolist(), line_join, end_type)
+    else:
+        for path in grid.ring_paths(geometry):
+            offsetter.AddPath(path, join, pyclipper.ET_CLOSEDPOLYGON)
 
-    def from_grid(contour):
-        return np.array(contour) / scale + origin
-
-    polygons = _polygons_from_tree(offsetter.Execute2(distance * scale), from_grid)
+    polygons = grid.polygons(offsetter.Execute2(distance * grid.scale))
     return _repaired(polygons[0] if len(polygons) == 1 else MultiPolygon(polygons))

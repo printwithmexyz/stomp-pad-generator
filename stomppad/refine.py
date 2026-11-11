@@ -13,6 +13,7 @@ from .overlay import (
     robust_buffer,
     robust_difference,
     robust_intersection,
+    robust_simplify,
     robust_union,
 )
 from .svg_parse import normalize_color, regions_from_fills
@@ -115,7 +116,7 @@ def _printable_pieces(geometry, settings):
 
 
 def _clean_geometry(geometry, settings):
-    simplified = geometry.simplify(settings.simplify_tolerance, preserve_topology=True)
+    simplified = robust_simplify(geometry, settings.simplify_tolerance)
     return _printable_pieces(_open(simplified, settings.min_feature / 2), settings)
 
 

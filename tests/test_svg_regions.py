@@ -24,6 +24,7 @@ from stomppad.overlay import (
     robust_buffer,
     robust_difference,
     robust_intersection,
+    robust_simplify,
     robust_union,
 )
 from stomppad.svg_parse import UnsafeXmlError, parse_transform
@@ -152,6 +153,33 @@ print('survived')
     result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == 'survived'
+
+
+@pytest.mark.parametrize('tolerance', [0.05, 0.3])
+def test_simplify_stays_within_its_tolerance(tolerance):
+    annulus = Point(0, 0).buffer(20, 64).difference(Point(0, 0).buffer(10, 64))
+    simplified = robust_simplify(annulus, tolerance)
+    assert simplified.is_valid and len(simplified.interiors) == 1
+    assert len(simplified.exterior.coords) < len(annulus.exterior.coords) / 3
+    assert simplified.hausdorff_distance(annulus) <= tolerance
+    assert simplified.area == pytest.approx(annulus.area, rel=0.02)
+
+
+def test_simplify_leaves_corners_alone_and_drops_what_collapses():
+    assert robust_simplify(box(0, 0, 20, 10), 0.5).equals(box(0, 0, 20, 10))
+    assert robust_simplify(box(0, 0, 20, 0.01), 0.5).is_empty
+    assert robust_simplify(Polygon(), 0.5).is_empty
+    with_pinhole = box(0, 0, 20, 20).difference(box(5, 5, 5.01, 5.01))
+    assert len(robust_simplify(with_pinhole, 0.5).interiors) == 0
+
+
+def test_simplify_untangles_rings_it_pushed_across_each_other():
+    wavy_edge = [(x, 10 + 0.2 * (-1) ** x) for x in range(21)]
+    shell = Polygon([(0, 0), (20, 0), *reversed(wavy_edge)])
+    hole = Polygon([(x, y - 0.1) for x, y in wavy_edge] + [(20, 5), (0, 5)])
+    simplified = robust_simplify(shell.difference(hole), 0.5)
+    assert simplified.is_valid
+    assert simplified.area == pytest.approx(100, abs=8)
 
 
 def test_union_of_nothing_is_empty():
