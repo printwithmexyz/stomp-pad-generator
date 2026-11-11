@@ -1,8 +1,9 @@
 import math
+import time
 
 import numpy as np
 import pytest
-from shapely.geometry import Point, box
+from shapely.geometry import Point, Polygon, box
 
 from stomppad import (
     CleanupSettings,
@@ -15,7 +16,7 @@ from stomppad import (
     printability_warnings,
     scale_regions_to_mm,
 )
-from stomppad.svg_parse import parse_transform
+from stomppad.svg_parse import UnsafeXmlError, parse_transform
 
 SVG_NS = 'xmlns="http://www.w3.org/2000/svg"'
 
@@ -74,6 +75,17 @@ def test_group_transform_moves_and_scales_shape(svg):
     assert parsed.regions[0].geometry.bounds == pytest.approx((100, 0, 150, 50))
 
 
+def test_child_transform_applies_inside_parent_transform(svg):
+    art = ('<g transform="translate(50,0)">'
+           '<rect width="10" height="10" transform="scale(2)"/></g>')
+    assert parse_svg(svg(art)).regions[0].geometry.bounds == pytest.approx((50, 0, 70, 20))
+
+
+def test_matrix_and_skew_transforms():
+    assert parse_transform('matrix(1 2 3 4 5 6)') @ np.array([1, 1, 1]) == pytest.approx([9, 12, 1])
+    assert parse_transform('skewX(45)') @ np.array([0, 10, 1]) == pytest.approx([10, 10, 1])
+
+
 def test_transforms_compose_left_to_right():
     matrix = parse_transform('translate(10,20) rotate(90)')
     assert matrix @ np.array([1, 0, 1]) == pytest.approx([10, 21, 1])
@@ -108,6 +120,54 @@ def test_lone_full_canvas_shape_is_not_a_background(svg):
     assert parsed.fills() == ['#ff0000']
 
 
+def test_lone_shape_with_a_stroke_keeps_its_fill(svg):
+    art = '<rect width="100" height="100" fill="red" stroke="black" stroke-width="4"/>'
+    parsed = parse_svg(svg(art))
+    assert parsed.background_fill is None
+    assert parsed.fills() == ['#ff0000', '#000000']
+
+
+def test_percent_sized_background_is_dropped(svg):
+    art = '<rect width="100%" height="100%" fill="white"/><circle cx="250" cy="250" r="100"/>'
+    parsed = parse_svg(svg(art, f'{SVG_NS} viewBox="0 0 500 500"'))
+    assert parsed.background_fill == '#ffffff'
+    assert parsed.fills() == ['#000000']
+
+
+def test_background_with_offset_viewbox(svg):
+    art = '<rect x="-50" y="-50" width="100" height="100" fill="#fff"/><circle r="20"/>'
+    parsed = parse_svg(svg(art, f'{SVG_NS} viewBox="-50 -50 100 100"'))
+    assert parsed.background_fill == '#ffffff'
+
+
+def test_background_detected_from_width_and_height_with_units(svg):
+    art = ('<rect width="60" height="60"/>'
+           '<circle cx="150" cy="150" r="10" fill="red"/>')
+    parsed = parse_svg(svg(art, f'{SVG_NS} width="50mm" height="50mm"'))
+    assert parsed.background_fill is None
+    assert parsed.viewbox == pytest.approx((0, 0, 188.976, 188.976), abs=0.001)
+
+
+def test_rounded_badge_under_a_glyph_is_not_a_background(svg):
+    art = ('<rect width="100" height="100" rx="10" fill="#e00"/>'
+           '<circle cx="50" cy="50" r="20" fill="#fff"/>')
+    parsed = parse_svg(svg(art))
+    assert parsed.background_fill is None
+    assert parsed.fills() == ['#ee0000', '#ffffff']
+
+
+def test_dropped_background_is_reported(svg):
+    parsed = parse_svg(svg(BACKGROUND + '<circle cx="50" cy="50" r="30"/>'))
+    assert any('background' in warning for warning in parsed.warnings)
+
+
+def test_art_matching_the_background_gets_a_clear_warning(svg):
+    art = '<rect width="100" height="100"/><circle cx="50" cy="50" r="30"/>'
+    parsed = parse_svg(svg(art))
+    assert parsed.regions == []
+    assert any('nothing is left' in warning for warning in parsed.warnings)
+
+
 def test_background_colored_shape_cuts_a_hole(svg):
     smiley = (BACKGROUND
               + '<circle cx="50" cy="50" r="40" fill="#010102"/>'
@@ -122,9 +182,10 @@ def test_background_colored_shape_cuts_a_hole(svg):
     assert not parsed.silhouette().contains(Point(50, 60))
 
 
-def test_void_fill_cuts_a_hole(svg):
+@pytest.mark.parametrize('void_fills', [['red'], 'red', ('#f00',)])
+def test_void_fill_cuts_a_hole(svg, void_fills):
     art = '<rect width="100" height="100"/><circle cx="50" cy="50" r="20" fill="red"/>'
-    parsed = parse_svg(svg(art), keep_background=True, void_fills=['red'])
+    parsed = parse_svg(svg(art), keep_background=True, void_fills=void_fills)
     assert parsed.fills() == ['#000000']
     assert total_area(parsed) == pytest.approx(10000 - math.pi * 400, rel=0.01)
 
@@ -162,6 +223,66 @@ def test_fill_from_stylesheet_class(svg):
     assert parse_svg(svg(art)).fills() == ['#ff0000', '#0000ff']
 
 
+def test_stylesheet_specificity_and_compound_selectors(svg):
+    art = ('<style>#hero{fill:#00f} rect{fill:#0f0} .warm{fill:#f00} circle.warm{fill:#ff0}</style>'
+           '<rect width="10" height="10" fill="black"/>'
+           '<rect class="warm" x="20" width="10" height="10"/>'
+           '<rect class="warm" id="hero" x="40" width="10" height="10"/>'
+           '<circle class="warm" cx="70" cy="5" r="5"/>')
+    parsed = parse_svg(svg(art))
+    assert parsed.fills() == ['#00ff00', '#ff0000', '#0000ff', '#ffff00']
+    assert parsed.warnings == []
+
+
+def test_unsupported_selector_warns(svg):
+    art = '<style>g > .deep{fill:#00f}</style><g><rect class="deep" width="10" height="10"/></g>'
+    parsed = parse_svg(svg(art))
+    assert parsed.fills() == ['#000000']
+    assert any('CSS selectors' in warning for warning in parsed.warnings)
+
+
+def test_inherit_keyword_takes_the_parent_value(svg):
+    art = '<g fill="red"><rect width="10" height="10" fill="inherit"/></g>'
+    assert parse_svg(svg(art)).fills() == ['#ff0000']
+
+
+def test_gradient_and_current_color_fall_back_to_black(svg):
+    art = ('<rect width="10" height="10" fill="url(#fade)"/>'
+           '<rect x="20" width="10" height="10" fill="currentColor"/>')
+    parsed = parse_svg(svg(art))
+    assert parsed.fills() == ['#000000']
+    assert any('Gradient' in warning for warning in parsed.warnings)
+
+
+@pytest.mark.parametrize('invisible', [
+    'fill="blue" opacity="0"',
+    'fill="blue" fill-opacity="0"',
+    'fill="rgba(0,0,255,0)"',
+    'fill="#0000ff00"',
+    'fill="white" style="opacity:0.01"',
+])
+def test_transparent_overlay_is_not_painted(svg, invisible):
+    art = f'<rect width="50" height="50" fill="red"/><rect width="100" height="100" {invisible}/>'
+    parsed = parse_svg(svg(art))
+    assert [(region.fill, region.geometry.area) for region in parsed.regions] == [('#ff0000', 2500)]
+
+
+def test_group_opacity_hides_children(svg):
+    art = '<rect width="10" height="10" fill="red"/><g opacity="0"><rect width="100" height="100"/></g>'
+    assert parse_svg(svg(art)).fills() == ['#ff0000']
+
+
+def test_transparent_stroke_is_not_painted(svg):
+    art = '<rect x="10" y="10" width="50" height="50" stroke="black" stroke-width="10" stroke-opacity="0"/>'
+    assert total_area(parse_svg(svg(art))) == pytest.approx(2500)
+
+
+def test_semi_transparent_shape_is_solid_with_a_warning(svg):
+    parsed = parse_svg(svg('<rect width="10" height="10" fill="red" opacity="0.5"/>'))
+    assert parsed.fills() == ['#ff0000']
+    assert any('Semi-transparent' in warning for warning in parsed.warnings)
+
+
 def test_inline_style_beats_attribute(svg):
     parsed = parse_svg(svg('<rect width="10" height="10" fill="red" style="fill:#00ff00"/>'))
     assert parsed.fills() == ['#00ff00']
@@ -196,12 +317,20 @@ def test_comma_separated_viewbox(svg):
     assert parsed.viewbox == (0, 0, 100, 100)
 
 
-def test_hidden_and_defs_shapes_are_skipped(svg):
-    art = ('<defs><rect width="100" height="100"/></defs>'
-           '<g display="none"><rect width="100" height="100"/></g>'
-           '<rect width="100" height="100" style="visibility:hidden"/>'
-           '<rect width="10" height="10" fill="red"/>')
-    assert parse_svg(svg(art)).fills() == ['#ff0000']
+@pytest.mark.parametrize('hidden', [
+    '<defs><rect x="50" width="10" height="10"/></defs>',
+    '<g display="none"><rect x="50" width="10" height="10"/></g>',
+    '<rect x="50" width="10" height="10" style="visibility:hidden"/>',
+    '<g style="display: none"><rect x="50" width="10" height="10"/></g>',
+])
+def test_hidden_and_defs_shapes_are_skipped(svg, hidden):
+    parsed = parse_svg(svg(hidden + '<rect width="10" height="10" fill="red"/>'))
+    assert [(region.fill, region.geometry.area) for region in parsed.regions] == [('#ff0000', 100)]
+
+
+def test_visible_child_of_hidden_group_shows(svg):
+    art = '<g visibility="hidden"><rect width="10" height="10" visibility="visible"/></g>'
+    assert total_area(parse_svg(svg(art))) == pytest.approx(100)
 
 
 def test_stroke_only_line_becomes_a_bar(svg):
@@ -209,6 +338,30 @@ def test_stroke_only_line_becomes_a_bar(svg):
     parsed = parse_svg(svg(art))
     assert parsed.regions[0].geometry.bounds == pytest.approx((10, 45, 90, 55))
     assert total_area(parsed) == pytest.approx(800)
+
+
+def test_stroke_on_closed_shape_has_full_corners(svg):
+    art = '<rect x="20" y="20" width="60" height="60" fill="none" stroke="black" stroke-width="4"/>'
+    assert total_area(parse_svg(svg(art))) == pytest.approx(960)
+
+
+def test_round_cap_and_join(svg):
+    art = ('<path d="M10 50 L90 50" fill="none" stroke="black" stroke-width="10" '
+           'stroke-linecap="round"/>')
+    assert total_area(parse_svg(svg(art))) == pytest.approx(800 + math.pi * 25, rel=0.01)
+
+
+def test_sharp_stroke_corner_is_bevelled_past_the_miter_limit(svg):
+    spike = '<polyline points="40,90 50,10 60,90" fill="none" stroke="black" stroke-width="10" {}/>'
+    default_limit = parse_svg(svg(spike.format('')))
+    high_limit = parse_svg(svg(spike.format('stroke-miterlimit="20"')))
+    assert default_limit.silhouette().bounds[1] > 4
+    assert high_limit.silhouette().bounds[1] < -20
+
+
+def test_square_stroke_corner_stays_mitred(svg):
+    art = '<polyline points="10,10 50,10 50,50" fill="none" stroke="black" stroke-width="10"/>'
+    assert parse_svg(svg(art)).silhouette().bounds == pytest.approx((10, 5, 55, 50))
 
 
 def test_stroke_width_follows_transform(svg):
@@ -219,6 +372,66 @@ def test_stroke_width_follows_transform(svg):
 def test_rounded_rect(svg):
     parsed = parse_svg(svg('<rect width="100" height="100" rx="10"/>'), samples_per_segment=60)
     assert total_area(parsed) == pytest.approx(10000 - (4 - math.pi) * 100, rel=0.001)
+
+
+def test_ellipse_uses_both_radii(svg):
+    parsed = parse_svg(svg('<ellipse cx="50" cy="50" rx="40" ry="10"/>'))
+    assert parsed.regions[0].geometry.bounds == pytest.approx((10, 40, 90, 60), abs=0.1)
+
+
+def test_lengths_with_units(svg):
+    parsed = parse_svg(svg('<rect width="1in" height="25.4mm"/>', f'{SVG_NS} viewBox="0 0 200 200"'))
+    assert parsed.regions[0].geometry.bounds == pytest.approx((0, 0, 96, 96))
+
+
+def test_drawing_after_close_without_move_starts_a_new_subpath(svg):
+    parsed = parse_svg(svg('<path fill-rule="evenodd" d="M0 0 H10 V10 Z L-10 0 L-10 -10 Z"/>'))
+    assert total_area(parsed) == pytest.approx(100)
+
+
+def test_invalid_path_is_skipped_with_a_warning(svg):
+    art = '<path d="M0 0 L10 0 L10 10 L"/><path d="L10 0 L10 10 Z"/><rect width="5" height="5" fill="red"/>'
+    parsed = parse_svg(svg(art))
+    assert parsed.fills() == ['#ff0000']
+    assert any('invalid data' in warning for warning in parsed.warnings)
+
+
+def test_entity_declarations_give_a_clear_error_or_parse(tmp_path):
+    path = tmp_path / 'illustrator.svg'
+    path.write_text(
+        '<?xml version="1.0"?>'
+        '<!DOCTYPE svg [ <!ENTITY ns_svg "http://www.w3.org/2000/svg"> ]>'
+        '<svg xmlns="&ns_svg;" viewBox="0 0 10 10"><rect width="5" height="5"/></svg>'
+    )
+    try:
+        assert len(parse_svg(str(path)).regions) == 1
+    except ValueError as error:
+        assert isinstance(error.__cause__, UnsafeXmlError)
+        assert 'plain SVG' in str(error)
+
+
+def test_many_subpaths_stay_fast(svg):
+    squares = ''.join(
+        f'M{x} {y} h8 v8 h-8 Z M{x + 2} {y + 2} h4 v4 h-4 Z'
+        for x in range(0, 400, 10) for y in range(0, 200, 10)
+    )
+    path = svg(f'<path fill-rule="evenodd" d="{squares}"/>', f'{SVG_NS} viewBox="0 0 400 200"')
+    started = time.perf_counter()
+    parsed = parse_svg(path)
+    assert time.perf_counter() - started < 5
+    assert total_area(parsed) == pytest.approx(800 * (64 - 16))
+
+
+def test_many_overlapping_shapes_stay_fast(svg):
+    rng = np.random.default_rng(7)
+    circles = ''.join(
+        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4" fill="{color}"/>'
+        for (x, y), color in zip(rng.uniform(0, 400, (800, 2)), ['red', 'blue', 'lime', 'gold'] * 200)
+    )
+    started = time.perf_counter()
+    parsed = parse_svg(svg(circles, f'{SVG_NS} viewBox="0 0 400 400"'))
+    assert time.perf_counter() - started < 5
+    assert len(parsed.fills()) == 4
 
 
 def test_polyline_fill_closes_itself(svg):
@@ -246,6 +459,16 @@ def test_scale_to_width_and_flip_y():
     assert scale == pytest.approx(2)
     assert scaled[0].geometry.bounds == pytest.approx((0, 20, 100, 40))
     assert scaled[1].geometry.bounds == pytest.approx((0, 0, 100, 20))
+
+
+def test_scaled_exteriors_are_counter_clockwise():
+    scaled, _ = scale_regions_to_mm([Region(0, '#000000', box(0, 0, 50, 20))], 100)
+    assert scaled[0].geometry.exterior.is_ccw
+
+
+def test_scaling_nothing_is_an_error():
+    with pytest.raises(ValueError, match='No regions'):
+        scale_regions_to_mm([], 100)
 
 
 def test_scale_fits_inside_width_and_height():
@@ -282,6 +505,42 @@ def test_cleanup_removes_spikes_specks_and_pinholes():
     assert len(cleaned[0].geometry.interiors) == 0
 
 
+def test_merge_tolerance_boundary():
+    regions = [Region(0, '#000000', box(0, 0, 20, 20)), Region(1, '#111111', box(30, 0, 40, 10))]
+    assert len({r.fill for r in merge_similar_fills(regions, tolerance=17)}) == 1
+    assert len({r.fill for r in merge_similar_fills(regions, tolerance=16)}) == 2
+
+
+def test_cleanup_never_grows_a_shape():
+    rounded_wedge = Point(0, 0).buffer(0.15).union(Point(30, 0).buffer(2.5)).convex_hull
+    cleaned, _ = clean_regions([Region(0, '#000000', rounded_wedge)], CleanupSettings(simplify_tolerance=0))
+    assert cleaned[0].geometry.difference(rounded_wedge).area == pytest.approx(0, abs=1e-9)
+
+
+def test_cleaned_colors_do_not_overlap():
+    inner = Region(0, '#ff0000', Point(0, 0).buffer(10, 64))
+    outer = Region(1, '#0000ff', Point(0, 0).buffer(20, 16).difference(Point(0, 0).buffer(10, 64)))
+    cleaned, _ = clean_regions([inner, outer], CleanupSettings(simplify_tolerance=0.3))
+    red, blue = (region.geometry for region in cleaned)
+    assert red.intersection(blue).area == pytest.approx(0, abs=1e-9)
+
+
+def test_simplify_removes_stair_steps():
+    stairs = [(0, 0), (20, 0)] + [(20 - i * 0.02, 10 + (i % 2) * 0.02) for i in range(1000)] + [(0, 10)]
+    cleaned, _ = clean_regions([Region(0, '#000000', Polygon(stairs))])
+    assert len(cleaned[0].geometry.exterior.coords) < 20
+
+
+def test_cleanup_notes_merges_and_trims():
+    regions = [
+        Region(0, '#000000', box(0, 0, 20, 20).union(box(20, 5, 60, 5.1))),
+        Region(1, '#010101', box(0, 30, 20, 50)),
+    ]
+    _, notes = clean_regions(regions)
+    assert any(note.startswith('Merged 1') for note in notes)
+    assert any(note.startswith('Trimmed 4.0') for note in notes)
+
+
 def test_cleanup_reports_colors_it_removed():
     regions = [Region(0, '#000000', box(0, 0, 20, 20)), Region(1, '#ff0000', box(30, 0, 30.2, 5))]
     cleaned, notes = clean_regions(regions)
@@ -316,6 +575,18 @@ def test_override_drop_and_recolor():
     assert edited[0].geometry.area == pytest.approx(200)
 
 
+def test_recolor_to_none_drops_the_region():
+    regions = [Region(0, '#ff0000', box(0, 0, 10, 10)), Region(1, '#0000ff', box(20, 0, 30, 10))]
+    edited = apply_overrides(regions, recolor={1: 'none'})
+    assert [region.fill for region in edited] == ['#ff0000']
+    assert len(clean_regions(edited)[0]) == 1
+
+
+def test_overrides_ignore_unknown_ids():
+    regions = [Region(0, '#ff0000', box(0, 0, 10, 10))]
+    assert apply_overrides(regions, drop_ids=[9], recolor={9: 'blue'}) == regions
+
+
 # --- printability -----------------------------------------------------------
 
 def test_wide_region_has_no_warnings():
@@ -331,6 +602,12 @@ def test_mostly_narrow_region_is_flagged():
     lollipop = box(0, 0, 20, 20).union(box(20, 9, 320, 11))
     warnings = printability_warnings([Region(0, '#000000', lollipop)], pyramid_size=4)
     assert [w.code for w in warnings] == ['partial_grip']
+
+
+def test_safety_margin_tightens_the_fit():
+    strip = [Region(0, '#000000', box(0, 0, 40, 4.5))]
+    assert printability_warnings(strip, pyramid_size=4, safety_margin=0.1) == []
+    assert [w.code for w in printability_warnings(strip, pyramid_size=4, safety_margin=0.5)] == ['no_grip']
 
 
 def test_more_colors_than_filaments():

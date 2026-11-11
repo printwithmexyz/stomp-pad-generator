@@ -34,6 +34,21 @@ Phases, each a review gate:
 Open for Phase B: whether a void inside the artwork is a through-hole (today's
 behavior for holes) or a recess that shows the base color.
 
+Known gaps after Phase A, none blocking:
+
+- Not yet run inside Pyodide. Tested on CPython with shapely 2.0.6 and 2.2.
+- SVGs with DOCTYPE entity declarations (Illustrator "preserve editing
+  capabilities") raise a clear error on desktop, where `defusedxml` is
+  installed, and parse in the browser, where it is not.
+- Ignored without a warning: CSS `transform` in a `style` attribute, nested
+  `<svg>` viewports, `stroke-dasharray`, and the `color` property behind
+  `currentColor`.
+- Cleanup removes a sliver but leaves its footprint empty, so a 0.3 mm stripe
+  between two colors becomes a 0.3 mm groove. Decide in Phase C whether the
+  neighbour should absorb it.
+- A full-canvas plain rectangle under other art is always read as background.
+  If it is really the pad's base shape, pass `keep_background`.
+
 ## Decisions locked (from interview)
 
 | Decision | Choice |

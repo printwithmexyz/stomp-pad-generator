@@ -4,8 +4,15 @@ from dataclasses import dataclass, replace
 
 from shapely import affinity
 from shapely.geometry import Polygon
+from shapely.geometry.polygon import orient
 
-from .svg_parse import normalize_color, regions_from_fills, robust_union
+from .svg_parse import (
+    normalize_color,
+    polygon_parts,
+    regions_from_fills,
+    robust_difference,
+    robust_union,
+)
 
 
 @dataclass(frozen=True)
@@ -36,15 +43,18 @@ def scale_regions_to_mm(regions, target_width, target_height=None):
     lower-left corner at the origin. Returns (regions, scale_factor).
 
     Width alone sets the scale. With a height as well, the artwork fits inside
-    both and keeps its aspect ratio.
+    both and keeps its aspect ratio. Exteriors come back counter-clockwise,
+    since the flip would otherwise reverse them.
     """
+    if not regions:
+        raise ValueError('No regions to scale.')
     min_x, min_y, max_x, max_y = robust_union([r.geometry for r in regions]).bounds
     scale = target_width / (max_x - min_x)
     if target_height:
         scale = min(scale, target_height / (max_y - min_y))
     matrix = [scale, 0, 0, -scale, -min_x * scale, max_y * scale]
     scaled = [
-        replace(region, geometry=affinity.affine_transform(region.geometry, matrix))
+        replace(region, geometry=orient(affinity.affine_transform(region.geometry, matrix)))
         for region in regions
     ]
     return scaled, scale
@@ -79,9 +89,12 @@ def merge_similar_fills(regions, tolerance):
 
 
 def _open(geometry, radius):
-    """Erase anything thinner than 2 * radius. Mitre joins keep sharp corners sharp."""
+    """
+    Erase anything thinner than 2 * radius. Mitre joins keep sharp corners
+    sharp, and clipping to the input stops them overshooting rounded tips.
+    """
     shrunk = geometry.buffer(-radius, join_style='mitre')
-    return shrunk.buffer(radius, join_style='mitre')
+    return shrunk.buffer(radius, join_style='mitre').intersection(geometry)
 
 
 def _without_pinholes(polygon, min_area):
@@ -89,22 +102,22 @@ def _without_pinholes(polygon, min_area):
     return Polygon(polygon.exterior, holes)
 
 
+def _printable_pieces(geometry, settings):
+    pieces = [p for p in polygon_parts(geometry) if p.area >= settings.min_area]
+    return robust_union([_without_pinholes(p, settings.min_area) for p in pieces])
+
+
 def _clean_geometry(geometry, settings):
-    cleaned = geometry.simplify(settings.simplify_tolerance, preserve_topology=True)
-    cleaned = _open(cleaned, settings.min_feature / 2)
-    polygons = [cleaned] if cleaned.geom_type == 'Polygon' else list(getattr(cleaned, 'geoms', []))
-    kept = [
-        _without_pinholes(p, settings.min_area)
-        for p in polygons
-        if p.geom_type == 'Polygon' and p.area >= settings.min_area
-    ]
-    return robust_union(kept)
+    simplified = geometry.simplify(settings.simplify_tolerance, preserve_topology=True)
+    return _printable_pieces(_open(simplified, settings.min_feature / 2), settings)
 
 
 def clean_regions(regions, settings=CleanupSettings()):
     """
     Merge near-duplicate fills, smooth traced edges, and drop slivers, specks
-    and pinholes too small to print. Expects millimetres.
+    and pinholes too small to print. Expects millimetres. Colors never
+    overlap afterwards: where edges were smoothed past each other, the color
+    cleaned first keeps the overlap.
     Returns (regions, notes) where notes describe what was removed.
     """
     merged = merge_similar_fills(regions, settings.color_tolerance)
@@ -117,6 +130,9 @@ def clean_regions(regions, settings=CleanupSettings()):
     cleaned_by_fill = {}
     for fill, geometry in _geometry_by_fill(merged).items():
         cleaned = _clean_geometry(geometry, settings)
+        if cleaned_by_fill and not cleaned.is_empty:
+            taken = robust_union(cleaned_by_fill.values())
+            cleaned = _printable_pieces(robust_difference(cleaned, taken), settings)
         removed_area = geometry.area - cleaned.area
         if cleaned.is_empty:
             notes.append(f'Removed {fill} entirely: every piece was too small to print.')
@@ -130,10 +146,11 @@ def clean_regions(regions, settings=CleanupSettings()):
 def apply_overrides(regions, drop_ids=(), recolor=None):
     """
     Manual tweaks: drop regions by id and recolor regions ({id: color}).
-    Neighbours that end up the same color are joined, so ids are renumbered.
+    Recoloring to 'none' drops the region. Neighbours that end up the same
+    color are joined, so ids are renumbered.
     """
     recolor = {region_id: normalize_color(color) for region_id, color in (recolor or {}).items()}
-    dropped = set(drop_ids)
+    dropped = set(drop_ids) | {region_id for region_id, color in recolor.items() if color is None}
     edited = [
         replace(region, fill=recolor.get(region.id, region.fill))
         for region in regions
