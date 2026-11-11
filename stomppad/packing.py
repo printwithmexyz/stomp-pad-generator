@@ -1,6 +1,7 @@
 """Place grip pyramids inside regions on a hex grid, turned to follow each region's centerline."""
 
 from dataclasses import dataclass
+import math
 
 import numpy as np
 import shapely
@@ -10,6 +11,26 @@ from skimage.morphology import medial_axis
 from .overlay import robust_buffer
 
 TANGENT_SAMPLE_DISTANCE = 3.0  # mm of centerline used to judge its direction
+MAX_SKELETON_CELLS = 20_000_000    # raster cells; beyond this the browser runs out of memory
+MAX_GRID_POSITIONS = 2_000_000
+
+PACKING_LIMITS = {
+    'pyramid_size': (0.2, 100),
+    'pyramid_style': (3, 64),
+    'pyramid_spacing': (0, 100),
+    'safety_margin': (0, 100),
+    'skeleton_resolution': (0.02, 100),
+}
+
+
+def require_in_range(settings, limits):
+    """Raise ValueError unless each named setting is a finite number within its (low, high)."""
+    for name, (low, high) in limits.items():
+        value = getattr(settings, name)
+        is_number = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if not (is_number and math.isfinite(value) and low <= value <= high):
+            label = name.replace('_', ' ')
+            raise ValueError(f'{label} must be a number from {low} to {high}, got {value!r}')
 
 
 @dataclass(frozen=True)
@@ -22,12 +43,7 @@ class PackingSettings:
     skeleton_resolution: float = 0.3
 
     def __post_init__(self):
-        if self.pyramid_size <= 0 or self.skeleton_resolution <= 0:
-            raise ValueError('pyramid_size and skeleton_resolution must be greater than 0')
-        if self.pyramid_spacing < 0 or self.safety_margin < 0:
-            raise ValueError('pyramid_spacing and safety_margin cannot be negative')
-        if self.pyramid_style < 3:
-            raise ValueError('pyramid_style needs at least 3 sides')
+        require_in_range(self, PACKING_LIMITS)
 
 
 @dataclass
@@ -47,8 +63,14 @@ def _medial_axis(mask):
 def calculate_skeleton(geometry, resolution):
     """Medial-axis points of the geometry as an (N, 2) array."""
     min_x, min_y, max_x, max_y = geometry.bounds
-    grid_x = min_x + np.arange(int((max_x - min_x) / resolution) + 1) * resolution
-    grid_y = min_y + np.arange(int((max_y - min_y) / resolution) + 1) * resolution
+    columns, rows = int((max_x - min_x) / resolution) + 1, int((max_y - min_y) / resolution) + 1
+    if columns * rows > MAX_SKELETON_CELLS:
+        raise ValueError(
+            f'Skeleton resolution {resolution} is too fine for a pad this size. '
+            f'Use {math.sqrt((max_x - min_x) * (max_y - min_y) / MAX_SKELETON_CELLS):.2f} or more.'
+        )
+    grid_x = min_x + np.arange(columns) * resolution
+    grid_y = min_y + np.arange(rows) * resolution
     xx, yy = np.meshgrid(grid_x, grid_y)
     inside = shapely.contains_xy(geometry, xx.ravel(), yy.ravel()).reshape(xx.shape)
     rows, columns = np.where(_medial_axis(inside))
@@ -59,6 +81,8 @@ def hex_grid(bounds, pitch):
     """Hex-packed candidate centers covering the bounds, as an (N, 2) array."""
     min_x, min_y, max_x, max_y = bounds
     row_height = pitch * np.sqrt(3) / 2
+    if (max_x - min_x) * (max_y - min_y) / (pitch * row_height) > MAX_GRID_POSITIONS:
+        raise ValueError('Pyramid size and spacing are too small for a pad this size.')
     rows = np.arange(int(np.ceil((max_y - min_y) / row_height)) + 2)
     columns = np.arange(int(np.ceil((max_x - min_x) / pitch)) + 2)
     column_grid, row_grid = np.meshgrid(columns, rows)

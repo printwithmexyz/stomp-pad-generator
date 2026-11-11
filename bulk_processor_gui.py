@@ -650,7 +650,13 @@ class BulkProcessorGUI:
                         f.cancel()
                     break
 
-                result = future.result()
+                try:
+                    result = future.result()
+                except Exception as e:
+                    # A worker process that dies takes its result with it.
+                    failed_name = svg_futures[future].name
+                    result = {'success': False, 'file_stem': failed_name, 'scad_output': None, 'error': str(e)}
+                    self.log(f"[{failed_name}] ERROR: worker failed: {e}")
                 bump_progress()
 
                 if result['success']:

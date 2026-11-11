@@ -72,7 +72,7 @@ function readSettings() {
   for (const name of NUMBER_FIELDS) {
     const text = data.get(name);
     const value = Number(text);
-    if (text === null || text.trim() === '' || Number.isNaN(value)) {
+    if (text === null || text.trim() === '' || !Number.isFinite(value)) {
       throw new Error(`"${name.replaceAll('_', ' ')}" needs a number`);
     }
     settings[name] = WHOLE_NUMBER_FIELDS.has(name) ? Math.trunc(value) : value;
@@ -81,6 +81,14 @@ function readSettings() {
     settings[name] = data.get(name) === 'on';
   }
   return settings;
+}
+
+// A fatal Pyodide error, a WebAssembly trap or running out of memory all leave
+// the Python runtime unusable. An ordinary Python exception does not.
+function runtimeIsDead(error) {
+  return Boolean(error.pyodide_fatal_error)
+    || error instanceof WebAssembly.RuntimeError
+    || error instanceof RangeError;
 }
 
 // Pyodide wraps Python exceptions in a full traceback. The last line is the
@@ -128,7 +136,7 @@ function download(data, filename, mime) {
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
-function addResult(file, scad, stl, preview) {
+function addResult(file, scad, stl, preview, stlFailed) {
   const stem = file.name.replace(/\.svg$/i, '');
   const card = document.createElement('article');
   card.className = 'result';
@@ -141,7 +149,7 @@ function addResult(file, scad, stl, preview) {
   const meta = document.createElement('span');
   meta.className = 'result-meta';
   meta.textContent = `${preview.width.toFixed(1)} × ${preview.height.toFixed(1)} mm, `
-    + `${preview.positions.length} pyramids`;
+    + `${preview.positions.length} pyramids${stlFailed ? ', STL failed (see console)' : ''}`;
   header.append(name, meta);
   card.appendChild(header);
 
@@ -215,8 +223,10 @@ from stomppad.pad import PadSettings, build_pad
   log('Pyodide ready.');
 }
 
+// no-cache makes the browser revalidate, so a deploy can't leave it running
+// a mix of old and new modules.
 async function fetchOk(url) {
-  const response = await fetch(url);
+  const response = await fetch(url, { cache: 'no-cache' });
   if (!response.ok) throw new Error(`Failed to fetch ${url}: ${response.status}`);
   return response;
 }
@@ -250,9 +260,11 @@ preview_data = design.preview()
 
   const scad = pyodide.globals.get('scad_source');
   const previewProxy = pyodide.globals.get('preview_data');
-  const preview = previewProxy.toJs({ dict_converter: Object.fromEntries });
-  previewProxy.destroy();
-  return { scad, preview };
+  try {
+    return { scad, preview: previewProxy.toJs({ dict_converter: Object.fromEntries }) };
+  } finally {
+    previewProxy.destroy();
+  }
 }
 
 async function renderStlForFile(file, scad) {
@@ -309,21 +321,12 @@ processBtn.addEventListener('click', async () => {
       break;
     }
     setFileStatus(file.name, 'working');
+    let design;
     try {
-      const { scad, preview } = await processOne(file, settings);
-      let stl = null;
-      if (generateStl) {
-        try {
-          stl = await renderStlForFile(file, scad);
-        } catch (e) {
-          log(`ERROR rendering STL for ${file.name}: ${e.message || e}`);
-        }
-      }
-      addResult(file, scad, stl, preview);
-      setFileStatus(file.name, 'done');
+      design = await processOne(file, settings);
     } catch (e) {
       setFileStatus(file.name, 'error');
-      if (e.pyodide_fatal_error) {
+      if (runtimeIsDead(e)) {
         // Nothing more can run until the page is reloaded.
         pyodide = null;
         log(`ERROR: the geometry engine crashed on ${file.name} and took the Python runtime `
@@ -331,7 +334,21 @@ processBtn.addEventListener('click', async () => {
         break;
       }
       log(`ERROR processing ${file.name}: ${describeError(e)}`);
+      continue;
     }
+
+    let stl = null;
+    let stlFailed = false;
+    if (generateStl) {
+      try {
+        stl = await renderStlForFile(file, design.scad);
+      } catch (e) {
+        stlFailed = true;
+        log(`ERROR rendering STL for ${file.name}: ${e.message || e}`);
+      }
+    }
+    addResult(file, design.scad, stl, design.preview, stlFailed);
+    setFileStatus(file.name, 'done');
   }
   processBtn.disabled = pyodide === null;
   processBtn.textContent = pyodide === null ? 'Reload to continue' : 'Process all';

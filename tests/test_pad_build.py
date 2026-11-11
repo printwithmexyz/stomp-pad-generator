@@ -1,5 +1,6 @@
 import json
 import math
+import pickle
 import re
 import shutil
 import subprocess
@@ -13,7 +14,7 @@ from stomppad import packing
 from stomppad.openscad import generate_openscad
 from stomppad.packing import PackingSettings, calculate_skeleton, hex_grid, pyramid_footprints
 from stomppad.pad import PadSettings, build_pad
-from stomppad.overlay import polygon_parts
+from stomppad.overlay import polygon_parts, robust_union
 
 DONUT = ('<path fill-rule="evenodd" d="M50 5 A45 45 0 1 0 50 95 A45 45 0 1 0 50 5 Z '
          'M50 25 A25 25 0 1 0 50 75 A25 25 0 1 0 50 25 Z"/>')
@@ -56,7 +57,7 @@ def scad_module_geometry(scad, name):
         points = np.array(re.findall(r'\[([-\d.]+), ([-\d.]+)\]', points_text), dtype=float)
         paths = [[int(i) for i in path.split(', ')] for path in re.findall(r'\[([\d, ]+)\]', paths_text)]
         polygons.append(Polygon(points[paths[0]], [points[path] for path in paths[1:]]))
-    return shapely.union_all(polygons)
+    return robust_union(polygons)
 
 
 # --- voids ------------------------------------------------------------------
@@ -116,6 +117,10 @@ def test_loose_pieces_are_counted(svg):
 @pytest.mark.parametrize('bad_settings', [
     {'void_mode': 'pocket'}, {'recess_depth': -1}, {'base_thickness': 0},
     {'target_width': -5}, {'outline_offset': -1},
+    {'target_width': math.inf}, {'target_width': math.nan}, {'target_width': 1e300},
+    {'target_width': 1e12}, {'target_height': -5}, {'target_height': math.inf},
+    {'samples_per_segment': 1}, {'samples_per_segment': 0}, {'pyramid_height': math.inf},
+    {'base_thickness': '2'}, {'outline_height': True},
 ])
 def test_invalid_pad_settings_are_rejected(bad_settings):
     with pytest.raises(ValueError):
@@ -124,10 +129,29 @@ def test_invalid_pad_settings_are_rejected(bad_settings):
 
 @pytest.mark.parametrize('bad_settings', [
     {'pyramid_size': 0}, {'pyramid_style': 2}, {'safety_margin': -0.1}, {'skeleton_resolution': 0},
+    {'pyramid_size': math.inf}, {'pyramid_spacing': math.nan}, {'pyramid_style': 1000},
 ])
 def test_invalid_packing_settings_are_rejected(bad_settings):
     with pytest.raises(ValueError):
         PackingSettings(**bad_settings)
+
+
+def test_settings_that_would_exhaust_memory_are_refused(svg):
+    with pytest.raises(ValueError, match='too fine'):
+        build(svg(DONUT), target_width=2000, packing=PackingSettings(skeleton_resolution=0.02))
+    with pytest.raises(ValueError, match='too small for a pad this size'):
+        build(svg(DONUT), target_width=2000, packing=PackingSettings(pyramid_size=0.2, pyramid_spacing=0))
+
+
+def test_void_fills_have_one_canonical_order():
+    assert PadSettings(void_fills={'#f00', '#00f', '#0f0'}).void_fills == ('#00f', '#0f0', '#f00')
+    assert PadSettings(void_fills='red').void_fills == ('red',)
+    assert repr(PadSettings(void_fills=['b', 'a'])) == repr(PadSettings(void_fills=('a', 'b')))
+
+
+def test_settings_survive_a_trip_to_a_worker_process():
+    settings = PadSettings.from_params({'target_width': 152, 'pyramid_size': 3, 'void_mode': 'recess'})
+    assert pickle.loads(pickle.dumps(settings)) == settings
 
 
 def test_settings_from_form_values():
@@ -136,6 +160,7 @@ def test_settings_from_form_values():
         'void_mode': 'recess', 'recess_depth': 0.4,
     })
     assert settings.target_height is None
+    assert PadSettings.from_params({'target_height': 80}).target_height == 80
     assert settings.packing == PackingSettings(pyramid_size=3, pyramid_style=6)
     assert (settings.void_mode, settings.recess_depth) == ('recess', 0.4)
     with pytest.raises(ValueError, match='Unknown settings'):

@@ -14,7 +14,7 @@ from .pad import PadDesign, build_pad
 from .overlay import polygon_parts
 from .svg_parse import Region
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2  # bump whenever the pipeline can produce a different design for the same input
 STL_RENDER_TIMEOUT_SECONDS = 300
 
 
@@ -66,10 +66,12 @@ def _design_from_json(data, settings):
 def _read_cached_design(cache_file, key, settings, log):
     try:
         data = json.loads(cache_file.read_text())
+        if not isinstance(data, dict):
+            raise ValueError('not a design record')
         if data.get('key') != key:
             return None
         return _design_from_json(data, settings)
-    except (OSError, ValueError, KeyError, TypeError, shapely.errors.ShapelyError) as error:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, shapely.errors.ShapelyError) as error:
         log(f'  Cache unreadable, rebuilding: {error}')
         return None
 
@@ -134,7 +136,11 @@ def render_stl(scad_path, stl_path, openscad_path, log=print):
     if result.returncode != 0:
         log(f'  OpenSCAD error: {result.stderr.strip()}')
         return False
-    log(f'  STL file: {Path(stl_path).name}')
+    stl_path = Path(stl_path)
+    if not stl_path.exists() or stl_path.stat().st_size == 0:
+        log(f'  OpenSCAD finished but wrote no STL. {result.stderr.strip()}')
+        return False
+    log(f'  STL file: {stl_path.name}')
     return True
 
 

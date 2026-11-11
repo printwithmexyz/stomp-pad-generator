@@ -7,12 +7,23 @@ import shapely
 from shapely import affinity
 from shapely.geometry import Polygon
 
-from .packing import PackingSettings, pack_regions
+from .packing import PackingSettings, pack_regions, require_in_range
 from .refine import CleanupSettings, clean_regions, printability_warnings, scale_regions_to_mm
 from .overlay import polygon_parts, robust_buffer, robust_difference, robust_union
 from .svg_parse import parse_svg, regions_from_fills
 
 VOID_MODES = ('through', 'recess')
+MAX_PAD_SIZE = 2000  # mm
+
+PAD_LIMITS = {
+    'target_width': (1, MAX_PAD_SIZE),
+    'samples_per_segment': (2, 500),
+    'base_thickness': (0.1, 100),
+    'outline_offset': (0, 100),
+    'outline_height': (0, 100),
+    'pyramid_height': (0.1, 100),
+    'recess_depth': (0, 100),
+}
 
 
 @dataclass(frozen=True)
@@ -40,12 +51,12 @@ class PadSettings:
     def __post_init__(self):
         if self.void_mode not in VOID_MODES:
             raise ValueError(f'void_mode must be one of {VOID_MODES}, got {self.void_mode!r}')
-        for name in ('target_width', 'base_thickness', 'pyramid_height'):
-            if getattr(self, name) <= 0:
-                raise ValueError(f'{name} must be greater than 0')
-        for name in ('outline_offset', 'outline_height', 'recess_depth'):
-            if getattr(self, name) < 0:
-                raise ValueError(f'{name} cannot be negative')
+        require_in_range(self, PAD_LIMITS)
+        if self.target_height is not None:
+            require_in_range(self, {'target_height': (1, MAX_PAD_SIZE)})
+        # A fixed order, so equal settings always have the same repr (the cache key).
+        fills = (self.void_fills,) if isinstance(self.void_fills, str) else self.void_fills
+        object.__setattr__(self, 'void_fills', tuple(sorted(fills)))
 
     @property
     def recesses_voids(self):

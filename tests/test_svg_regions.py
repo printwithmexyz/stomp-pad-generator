@@ -1,4 +1,6 @@
 import math
+import subprocess
+import sys
 import time
 
 import numpy as np
@@ -98,6 +100,58 @@ def test_robust_buffer_keeps_holes_and_islands():
 def test_robust_buffer_of_nothing_is_empty():
     assert robust_buffer(Polygon(), 2).is_empty
     assert robust_buffer(box(0, 0, 1, 1), -1).is_empty
+
+
+def test_robust_buffer_far_from_the_origin_matches_the_same_shape_nearby():
+    near = robust_buffer(box(0, 0, 20, 10), 2, join_style='mitre')
+    far = robust_buffer(box(1e9, 1e9, 1e9 + 20, 1e9 + 10), 2, join_style='mitre')
+    assert far.area == pytest.approx(near.area) == pytest.approx(24 * 14)
+    assert far.bounds == pytest.approx((1e9 - 2, 1e9 - 2, 1e9 + 22, 1e9 + 12))
+
+
+@pytest.mark.parametrize('bad', [math.nan, math.inf])
+def test_robust_operations_treat_non_finite_shapes_as_nothing(bad):
+    broken_line = shapely.LineString([(0, 0), (bad, 1), (5, 5)])
+    broken_polygon = Polygon([(0, 0), (bad, 0), (1, 1)])
+    assert robust_buffer(broken_line, 1).is_empty
+    assert robust_buffer(box(0, 0, 1, 1), bad).is_empty
+    assert robust_union([broken_polygon, box(0, 0, 2, 2)]).area == pytest.approx(4)
+    assert robust_difference(box(0, 0, 2, 2), broken_polygon).area == pytest.approx(4)
+
+
+def test_closed_flag_decides_whether_a_line_gets_a_join_or_caps():
+    bowtie = shapely.LineString([(0, 0), (10, 10), (10, 0), (0, 10), (0, 0)])
+    style = {'cap_style': 'flat', 'join_style': 'mitre'}
+    joined = robust_buffer(bowtie, 1, closed=True, **style)
+    capped = robust_buffer(bowtie, 1, closed=False, **style)
+    start_corner = Point(-0.57, -1.56)
+    assert joined.contains(start_corner) and not capped.contains(start_corner)
+    assert robust_buffer(bowtie, 1, **style).area == pytest.approx(joined.area)
+
+
+def test_offsets_survive_inputs_that_would_abort_clipper():
+    # Clipper aborts the whole process outside its integer range, so a
+    # regression here cannot be caught as an exception. Hence the subprocess.
+    script = """
+import tempfile
+from shapely.geometry import LineString
+from stomppad import parse_svg
+from stomppad.overlay import robust_buffer
+robust_buffer(LineString([(1e12, 1e12), (1e12 + 1, 1e12)]), 0.1)
+robust_buffer(LineString([(1e15, 1e15), (1e15, 1e15)]), 1e-9)
+for body in (
+    '<path d="M50 50 L50 50" stroke="#000" stroke-width="1e-12" stroke-linecap="round" fill="none"/>',
+    '<path d="M1e6 1e6 L1e6 1e6" stroke="#000" stroke-width="1e-9" stroke-linecap="round" fill="none"/>',
+    '<rect width="5" height="5" stroke="black" stroke-width="1e999"/>',
+):
+    with tempfile.NamedTemporaryFile('w', suffix='.svg', delete=False) as handle:
+        handle.write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' + body + '</svg>')
+    parse_svg(handle.name)
+print('survived')
+"""
+    result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == 'survived'
 
 
 def test_union_of_nothing_is_empty():
@@ -449,6 +503,7 @@ def test_zero_length_stroke_is_a_dot_shaped_by_its_cap(svg, linecap, area):
     art = (f'<line x1="50" y1="50" x2="50" y2="50" stroke="black" stroke-width="4" '
            f'stroke-linecap="{linecap}"/><rect width="1" height="1" fill="red"/>')
     areas = {region.fill: region.geometry.area for region in parse_svg(svg(art)).regions}
+    assert ('#000000' in areas) == (area > 0)
     assert areas.get('#000000', 0) == pytest.approx(area, rel=0.01)
 
 
@@ -475,6 +530,18 @@ def test_lengths_with_units(svg):
 def test_drawing_after_close_without_move_starts_a_new_subpath(svg):
     parsed = parse_svg(svg('<path fill-rule="evenodd" d="M0 0 H10 V10 Z L-10 0 L-10 -10 Z"/>'))
     assert total_area(parsed) == pytest.approx(100)
+
+
+@pytest.mark.parametrize('broken', [
+    '<g transform="scale(1e999)"><rect width="1" height="1" fill="#f00"/></g>',
+    '<circle cx="0" cy="0" r="1e999" fill="#f00"/>',
+    '<g transform="scale(1e200)"><rect width="1e200" height="1e200" fill="#f00"/></g>',
+    '<rect x="1e12" width="5" height="5" fill="#f00"/>',
+])
+def test_out_of_range_shapes_are_skipped_with_a_warning(svg, broken):
+    parsed = parse_svg(svg(broken + '<rect width="5" height="5"/>'))
+    assert [(region.fill, region.geometry.area) for region in parsed.regions] == [('#000000', 25)]
+    assert any('out-of-range' in warning for warning in parsed.warnings)
 
 
 def test_invalid_path_is_skipped_with_a_warning(svg):
@@ -627,6 +694,13 @@ def test_cleanup_notes_merges_and_trims():
     _, notes = clean_regions(regions)
     assert any(note.startswith('Merged 1') for note in notes)
     assert any(note.startswith('Trimmed 4.0') for note in notes)
+
+
+def test_cleanup_keeps_sharp_tips():
+    half_width = math.tan(math.radians(5)) * 20
+    spike = Polygon([(-half_width, 0), (half_width, 0), (0, 20)]).union(box(-10, -10, 10, 0))
+    cleaned, _ = clean_regions([Region(0, '#000000', spike)])
+    assert cleaned[0].geometry.bounds[3] > 19
 
 
 def test_cleanup_reports_colors_it_removed():

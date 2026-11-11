@@ -103,6 +103,9 @@ export async function renderStl(scadText) {
   } catch (e) {
     const reason = describeOpenscadError(e, instance);
     const tail = stderrLines.slice(-5).join('\n').trim();
+    // An instance that has thrown may have aborted for good. Start the next
+    // render on a fresh one so one bad file can't fail every file after it.
+    instancePromise = null;
     throw new Error(tail ? `${reason}\n${tail}` : reason);
   }
 

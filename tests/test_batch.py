@@ -68,9 +68,11 @@ def test_cache_misses_when_anything_changes(workspace, change):
         settings = PadSettings(target_width=60, void_mode='recess')
     else:
         (workspace / 'logo.svg').write_text(DONUT.replace('r="45"', '').replace('A45 45', 'A45 44'))
-    design = load_or_build_design(workspace / 'logo.svg', settings, cache, log.append)
+    load_or_build_design(workspace / 'logo.svg', settings, cache, log.append)
     assert '  Using cached design' not in log
-    assert design.settings == settings
+    assert sum('pyramids' in line for line in log) == 2
+    load_or_build_design(workspace / 'logo.svg', settings, cache, log.append)
+    assert log.count('  Using cached design') == 1
 
 
 def test_corrupt_cache_is_rebuilt(workspace):
@@ -84,6 +86,16 @@ def test_corrupt_cache_is_rebuilt(workspace):
     assert any('Cache unreadable' in line for line in log)
     assert design.art.area > 0
     assert json.loads(cache_file.read_text())['art'] != 'not geometry'
+
+
+@pytest.mark.parametrize('payload', ['[]', 'null', '{"key": ', '"design"'])
+def test_cache_holding_the_wrong_kind_of_data_is_rebuilt(workspace, payload):
+    cache, log = workspace / 'cache', []
+    load_or_build_design(workspace / 'logo.svg', SETTINGS, cache, log.append)
+    (cache / 'logo' / 'design.json').write_text(payload)
+    design = load_or_build_design(workspace / 'logo.svg', SETTINGS, cache, log.append)
+    assert any('Cache unreadable' in line for line in log)
+    assert len(design.positions()) > 0
 
 
 def test_no_cache_dir_means_no_cache(workspace):
@@ -118,6 +130,14 @@ def test_render_stl_surfaces_openscad_errors(workspace):
     log = []
     assert not render_stl(workspace / 'pad.scad', workspace / 'pad.stl', openscad, log.append)
     assert log == ['  OpenSCAD error: syntax error']
+
+
+@needs_shell_scripts
+def test_render_stl_fails_when_openscad_writes_nothing(workspace):
+    openscad = fake_openscad(workspace / 'openscad', 'exit 0\n')
+    log = []
+    assert not render_stl(workspace / 'pad.scad', workspace / 'pad.stl', openscad, log.append)
+    assert any('wrote no STL' in line for line in log)
 
 
 def test_debug_visualization_is_written(workspace):

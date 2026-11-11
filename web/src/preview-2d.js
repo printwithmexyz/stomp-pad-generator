@@ -71,6 +71,7 @@ export function draw2dPreview(canvas, design) {
     (cssWidth - 2 * MARGIN_PX) / design.width,
     (cssHeight - 2 * MARGIN_PX) / design.height,
   );
+  if (!(scale > 0)) return;  // a hidden or collapsed canvas has no room to draw in
   const left = (cssWidth - design.width * scale) / 2;
   const top = (cssHeight - design.height * scale) / 2;
   const toCanvas = (x, y) => [left + x * scale, top + (design.height - y) * scale];

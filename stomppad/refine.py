@@ -18,6 +18,9 @@ from .overlay import (
 from .svg_parse import normalize_color, regions_from_fills
 
 
+TIP_MITRE_LIMIT = 50  # lets the regrow step rebuild tips as sharp as about 2 degrees
+
+
 @dataclass(frozen=True)
 class CleanupSettings:
     min_feature: float = 0.4          # mm, thinnest wall worth printing (about one nozzle line)
@@ -93,11 +96,12 @@ def merge_similar_fills(regions, tolerance):
 
 def _open(geometry, radius):
     """
-    Erase anything thinner than 2 * radius. Mitre joins keep sharp corners
-    sharp, and clipping to the input stops them overshooting rounded tips.
+    Erase anything thinner than 2 * radius. Growing back with long mitres
+    rebuilds sharp tips, and clipping to the input stops them overshooting.
     """
     shrunk = robust_buffer(geometry, -radius, join_style='mitre')
-    return robust_intersection(robust_buffer(shrunk, radius, join_style='mitre'), geometry)
+    regrown = robust_buffer(shrunk, radius, join_style='mitre', mitre_limit=TIP_MITRE_LIMIT)
+    return robust_intersection(regrown, geometry)
 
 
 def _without_pinholes(polygon, min_area):

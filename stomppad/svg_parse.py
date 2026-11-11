@@ -35,6 +35,7 @@ except ImportError:
 BACKGROUND_COVERAGE = 0.95
 BACKGROUND_RECTANGULARITY = 0.999
 MIN_VISIBLE_ALPHA = 0.05
+MAX_COORDINATE = 1e9  # user units; anything larger is a broken file, not artwork
 FALLBACK_FILL = '#000000'
 PIXELS_PER_UNIT = {
     '': 1.0, 'px': 1.0, 'in': 96.0, 'cm': 96 / 2.54, 'mm': 96 / 25.4, 'pt': 96 / 72, 'pc': 16.0,
@@ -481,8 +482,9 @@ def _stroke_geometry(subpaths, width, style):
     for subpath in subpaths:
         points = _closed_ring(subpath.points) if subpath.closed else subpath.points
         sharp = join == 'mitre' and _has_corner_past_miter_limit(points, subpath.closed, miter_limit)
+        # closed comes from the path's own Z, not from where its ends happen to land.
         outlines.append(robust_buffer(
-            LineString(points), width / 2,
+            LineString(points), width / 2, closed=subpath.closed,
             cap_style=cap, join_style='bevel' if sharp else join, mitre_limit=miter_limit,
         ))
     return robust_union(outlines)
@@ -492,6 +494,10 @@ def _paint_shape(element, tag, matrix, style, alpha, ctx):
     subpaths = _element_subpaths(element, tag, ctx)
     for subpath in subpaths:
         subpath.points = _apply_transform(subpath.points, matrix)
+    in_range = [s for s in subpaths if np.abs(s.points).max() <= MAX_COORDINATE]  # False for NaN too
+    if len(in_range) < len(subpaths):
+        ctx.warn('A shape with out-of-range coordinates was skipped.')
+    subpaths = in_range
     if not subpaths:
         return
     ctx.shapes_seen += 1
@@ -506,7 +512,7 @@ def _paint_shape(element, tag, matrix, style, alpha, ctx):
     view_diagonal = math.hypot(*ctx.viewport) / math.sqrt(2)
     stroke_width = (_length(style['stroke-width'], view_diagonal, 1.0)
                     * math.sqrt(abs(np.linalg.det(matrix[:2, :2]))))
-    if stroke_width > 0 and _is_painted(
+    if 0 < stroke_width <= MAX_COORDINATE and _is_painted(
             stroke, alpha * stroke_alpha * _fraction(style['stroke-opacity']), ctx):
         stroked = _stroke_geometry(subpaths, stroke_width, style)
         if not stroked.is_empty:
@@ -616,7 +622,10 @@ def parse_svg(svg_file, samples_per_segment=20, keep_background=False, void_fill
     viewbox = _parse_viewbox(root)
     ctx = _WalkContext(samples=samples_per_segment, viewport=viewbox[2:] if viewbox else (0.0, 0.0))
     ctx.css_rules = _parse_stylesheet(root, ctx)
-    _collect_paint(root, np.identity(3), dict(ROOT_STYLE), 1.0, ctx)
+    # Absurd numbers in a file overflow to inf or NaN here. Those shapes are
+    # dropped with a warning in _paint_shape, so numpy need not complain too.
+    with np.errstate(over='ignore', invalid='ignore'):
+        _collect_paint(root, np.identity(3), dict(ROOT_STYLE), 1.0, ctx)
 
     paint, background_fill = ctx.paint, None
     if not keep_background:

@@ -69,6 +69,12 @@ Known gaps:
   Re-export as plain SVG.
 - A bevelled stroke corner comes out slightly fuller than a browser draws it,
   because Clipper has no true bevel join.
+- Hostile or broken input is refused, not processed: shapes with NaN, infinite
+  or absurdly large coordinates are skipped with a warning, and settings
+  outside sane ranges (a 99999 mm pad, a 0.0001 mm skeleton grid) raise a
+  clear error before they can exhaust memory.
+- The web app has no automated tests. It is checked by driving the built
+  page in headless Chrome by hand.
 - Ignored without a warning: CSS `transform` in a `style` attribute, nested
   `<svg>` viewports, `stroke-dasharray`, and the `color` property behind
   `currentColor`.
