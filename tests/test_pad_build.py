@@ -446,7 +446,50 @@ def test_shapes_for_the_scad_sit_on_the_output_grid_with_no_specks(svg):
 def test_tidy_clears_what_openscad_would_choke_on():
     plate = box(0, 0, 20, 10).difference(box(5, 5, 5.0003, 5.0003)).union(box(20, 4, 22, 4.0003))
     tidied = _tidy(plate)
-    assert tidied.equals(box(0, 0, 20, 10))
+    assert len(tidied.interiors) == 0
+    assert tidied.bounds == pytest.approx((0, 0, 20, 10), abs=GRID_NOISE)
+    assert tidied.symmetric_difference(box(0, 0, 20, 10)).area < 1e-3
+
+
+needs_openscad = pytest.mark.skipif(shutil.which('openscad') is None, reason='needs the OpenSCAD executable')
+
+
+def render_part(scad_path, part):
+    """Volume of one rendered part. Fails if OpenSCAD reports leaving anything out."""
+    stl_path = scad_path.with_name(f'part_{part}.stl')
+    result = subprocess.run(
+        ['openscad', '-o', str(stl_path), '-D', f'part={part}', str(scad_path)],
+        check=True, capture_output=True, text=True,
+    )
+    assert 'ERROR' not in result.stderr
+    return stl_volume(stl_path)
+
+
+CORNER_TO_CORNER = '<rect width="50" height="50"/><rect x="50" y="50" width="50" height="50"/>'
+KISSING_DISCS = '<circle cx="25" cy="50" r="25"/><circle cx="75" cy="50" r="25"/>'
+
+
+@pytest.mark.parametrize('art', [CORNER_TO_CORNER, KISSING_DISCS])
+def test_shapes_that_meet_at_one_point_end_up_apart_or_properly_joined(svg, art):
+    parts = polygon_parts(build(svg(art)).art)
+    if len(parts) == 2:
+        assert parts[0].distance(parts[1]) > 0.001
+    else:
+        (joined,) = parts
+        assert not joined.buffer(-0.004).is_empty
+        assert len(polygon_parts(joined.buffer(-0.004))) == 1
+
+
+@needs_openscad
+@pytest.mark.parametrize('art', [CORNER_TO_CORNER, KISSING_DISCS])
+def test_shapes_that_meet_at_one_point_render(svg, tmp_path, art):
+    design = build(svg(art), target_width=40)
+    scad_path = tmp_path / 'pad.scad'
+    scad_path.write_text(generate_openscad(design))
+    cavity = design.art.area * 0.8
+    footprint = design.art.buffer(2, 64).area * 2.8
+    pyramids = len(design.positions()) * 16 * 2.5 / 3
+    assert render_part(scad_path, 0) == pytest.approx(footprint - cavity + pyramids, rel=0.01)
 
 
 def test_scad_has_one_color_branch_per_body_above_the_base(svg):
@@ -477,20 +520,6 @@ def test_a_speck_where_two_colors_meet_does_not_become_a_hole(svg):
     assert design.voids.is_empty
     assert sorted(body.fill for body in design.bodies) == ['#1d3557', '#e63946']
     assert sum(region.geometry.area for region in design.regions) == pytest.approx(6000, abs=0.05)
-
-
-needs_openscad = pytest.mark.skipif(shutil.which('openscad') is None, reason='needs the OpenSCAD executable')
-
-
-def render_part(scad_path, part):
-    """Volume of one rendered part. Fails if OpenSCAD reports leaving anything out."""
-    stl_path = scad_path.with_name(f'part_{part}.stl')
-    result = subprocess.run(
-        ['openscad', '-o', str(stl_path), '-D', f'part={part}', str(scad_path)],
-        check=True, capture_output=True, text=True,
-    )
-    assert 'ERROR' not in result.stderr
-    return stl_volume(stl_path)
 
 
 @needs_openscad

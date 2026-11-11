@@ -231,17 +231,22 @@ def robust_simplify(geometry, tolerance):
 
 def without_specks(geometry, width):
     """
-    Fill holes and gaps narrower than width, then shave off spikes and specks
-    narrower than width. Polygons that overlap or touch come back joined.
+    Fill holes and gaps narrower than width, then shave off spikes, specks
+    and necks narrower than width. Polygons that overlap or run alongside
+    each other come back joined.
 
     Set operations leave debris a grid step wide along every seam they cut.
     A later overlay on a slightly different grid can throw on detail that
     fine, so a shape pieced together from such scraps goes through here
     before GEOS sees it again.
+
+    The regrow after shaving uses round joins on purpose. Mitres would grow
+    two tips that met at a point straight back into each other, and parts
+    that touch at one point extrude into a solid no mesh can describe.
     """
     radius = width / 2
     filled = robust_buffer(robust_buffer(geometry, radius, 'mitre'), -radius, 'mitre')
-    return robust_buffer(robust_buffer(filled, -radius, 'mitre'), radius, 'mitre')
+    return robust_buffer(robust_buffer(filled, -radius, 'mitre'), radius, 'round')
 
 
 def _lines(geometry, closed):

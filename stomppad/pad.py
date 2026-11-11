@@ -21,7 +21,6 @@ from .overlay import (
     polygon_parts,
     robust_buffer,
     robust_difference,
-    robust_simplify,
     robust_union,
     snapped,
     without_specks,
@@ -257,8 +256,7 @@ def _close_gaps(geometry, radius):
 
 def _tidy(geometry):
     """A shape OpenSCAD can extrude: see SMALLEST_DETAIL."""
-    cleared = without_specks(geometry, SMALLEST_DETAIL)
-    return snapped(robust_simplify(cleared, SMALLEST_DETAIL / 4), OUTPUT_STEP)
+    return snapped(without_specks(geometry, SMALLEST_DETAIL), OUTPUT_STEP)
 
 
 def _enclosed_holes(art):
