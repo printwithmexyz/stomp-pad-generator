@@ -33,9 +33,10 @@ MAX_PAD_SIZE = 2000  # mm
 # OpenSCAD works at about 0.000015 mm. A hole or sliver near that size
 # collapses there, the extruded mesh comes out open, and OpenSCAD drops the
 # shape from the render with nothing but "mesh is not closed" in its log.
-# Set operations leave such specks along every seam, so shapes that go into
-# the .scad lose anything narrower than SMALLEST_DETAIL and then sit on the
-# OUTPUT_STEP grid, which is the precision the .scad is written at.
+# Two parts touching at a single point do the same. Set operations leave
+# such specks along every seam, so shapes that go into the .scad lose
+# anything narrower than SMALLEST_DETAIL and then sit on the OUTPUT_STEP
+# grid, which is the precision the .scad is written at.
 OUTPUT_STEP = 1e-4  # mm
 
 PAD_LIMITS = {
