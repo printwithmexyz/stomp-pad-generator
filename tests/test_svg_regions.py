@@ -3,6 +3,7 @@ import time
 
 import numpy as np
 import pytest
+import shapely
 from shapely.geometry import Point, Polygon, box
 
 from stomppad import (
@@ -16,9 +17,11 @@ from stomppad import (
     printability_warnings,
     scale_regions_to_mm,
 )
+from stomppad.overlay import polygon_parts, robust_difference, robust_intersection, robust_union
 from stomppad.svg_parse import UnsafeXmlError, parse_transform
 
 SVG_NS = 'xmlns="http://www.w3.org/2000/svg"'
+SNAP_NOISE = 1e-3  # mm^2; set operations snap to a grid a ten-millionth of the shape's size
 
 
 @pytest.fixture
@@ -32,6 +35,47 @@ def svg(tmp_path):
 
 def total_area(parsed):
     return sum(region.geometry.area for region in parsed.regions)
+
+
+# --- set operations that must never raise -----------------------------------
+
+BOWTIE = Polygon([(0, 0), (2, 2), (2, 0), (0, 2)])
+
+
+def test_plain_union_of_an_invalid_shape_raises():
+    # Why the package never calls GEOS set operations directly: in Pyodide this
+    # error is not a Python exception, it takes the whole runtime down.
+    with pytest.raises(shapely.errors.GEOSException):
+        BOWTIE.union(box(1, -1, 3, 3))
+
+
+def test_robust_operations_accept_invalid_shapes():
+    union = robust_union([BOWTIE, box(1, -1, 3, 3)])
+    assert union.is_valid
+    assert union.area == pytest.approx(8 + 1)
+    assert robust_difference(BOWTIE, box(1, -1, 3, 3)).area == pytest.approx(1)
+    assert robust_intersection(BOWTIE, box(1, -1, 3, 3)).area == pytest.approx(1)
+
+
+def test_robust_operations_on_ordinary_shapes():
+    assert robust_union([box(0, 0, 2, 2), box(1, 0, 3, 2)]).bounds == pytest.approx((0, 0, 3, 2))
+    assert robust_difference(box(0, 0, 2, 2), box(1, 0, 3, 2)).area == pytest.approx(2)
+    assert robust_intersection(box(0, 0, 2, 2), box(1, 0, 3, 2)).area == pytest.approx(2)
+    assert robust_difference(box(0, 0, 2, 2), Polygon()).area == pytest.approx(4)
+
+
+def test_union_of_nothing_is_empty():
+    assert robust_union([]).is_empty
+    assert robust_union([Polygon(), Polygon()]).is_empty
+
+
+def test_polygon_parts_reaches_into_collections():
+    nested = shapely.GeometryCollection([
+        box(0, 0, 1, 1), shapely.LineString([(0, 0), (1, 1)]), Polygon(),
+        shapely.MultiPolygon([box(2, 0, 3, 1), box(4, 0, 5, 1)]),
+    ])
+    assert len(polygon_parts(nested)) == 3
+    assert polygon_parts(Polygon()) == []
 
 
 # --- holes and fill rules ---------------------------------------------------
@@ -514,7 +558,7 @@ def test_merge_tolerance_boundary():
 def test_cleanup_never_grows_a_shape():
     rounded_wedge = Point(0, 0).buffer(0.15).union(Point(30, 0).buffer(2.5)).convex_hull
     cleaned, _ = clean_regions([Region(0, '#000000', rounded_wedge)], CleanupSettings(simplify_tolerance=0))
-    assert cleaned[0].geometry.difference(rounded_wedge).area == pytest.approx(0, abs=1e-9)
+    assert cleaned[0].geometry.difference(rounded_wedge).area < SNAP_NOISE
 
 
 def test_cleaned_colors_do_not_overlap():
@@ -522,7 +566,7 @@ def test_cleaned_colors_do_not_overlap():
     outer = Region(1, '#0000ff', Point(0, 0).buffer(20, 16).difference(Point(0, 0).buffer(10, 64)))
     cleaned, _ = clean_regions([inner, outer], CleanupSettings(simplify_tolerance=0.3))
     red, blue = (region.geometry for region in cleaned)
-    assert red.intersection(blue).area == pytest.approx(0, abs=1e-9)
+    assert red.intersection(blue).area < SNAP_NOISE
 
 
 def test_simplify_removes_stair_steps():

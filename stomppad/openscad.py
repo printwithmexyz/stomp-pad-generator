@@ -2,7 +2,7 @@
 
 from shapely.geometry.polygon import orient
 
-from .svg_parse import polygon_parts
+from .overlay import polygon_parts
 
 
 def _number(value):

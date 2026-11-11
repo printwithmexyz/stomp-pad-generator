@@ -7,6 +7,8 @@ import shapely
 from scipy.spatial import cKDTree
 from skimage.morphology import medial_axis
 
+from .overlay import robust_buffer
+
 TANGENT_SAMPLE_DISTANCE = 3.0  # mm of centerline used to judge its direction
 
 
@@ -99,7 +101,7 @@ def pyramid_footprints(positions, pyramid_size, sides=4):
 def pack_region(geometry, grid, settings):
     """Keep the grid positions whose whole pyramid base fits inside the geometry."""
     skeleton = calculate_skeleton(geometry, settings.skeleton_resolution)
-    safe_area = geometry.buffer(-settings.safety_margin) if settings.safety_margin > 0 else geometry
+    safe_area = robust_buffer(geometry, -settings.safety_margin) if settings.safety_margin > 0 else geometry
     if safe_area.is_empty:
         return PackedRegion(np.empty((0, 3)), skeleton)
 

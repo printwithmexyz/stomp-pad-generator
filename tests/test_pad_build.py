@@ -13,7 +13,7 @@ from stomppad import packing
 from stomppad.openscad import generate_openscad
 from stomppad.packing import PackingSettings, calculate_skeleton, hex_grid, pyramid_footprints
 from stomppad.pad import PadSettings, build_pad
-from stomppad.svg_parse import polygon_parts
+from stomppad.overlay import polygon_parts
 
 DONUT = ('<path fill-rule="evenodd" d="M50 5 A45 45 0 1 0 50 95 A45 45 0 1 0 50 5 Z '
          'M50 25 A25 25 0 1 0 50 75 A25 25 0 1 0 50 25 Z"/>')

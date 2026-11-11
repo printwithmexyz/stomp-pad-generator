@@ -11,7 +11,8 @@ import shapely
 from .openscad import generate_openscad
 from .packing import PackedRegion, pyramid_footprints
 from .pad import PadDesign, build_pad
-from .svg_parse import Region, polygon_parts
+from .overlay import polygon_parts
+from .svg_parse import Region
 
 CACHE_VERSION = 1
 STL_RENDER_TIMEOUT_SECONDS = 300

@@ -6,13 +6,16 @@ from shapely import affinity
 from shapely.geometry import Polygon
 from shapely.geometry.polygon import orient
 
-from .svg_parse import (
-    normalize_color,
+import shapely
+
+from .overlay import (
     polygon_parts,
-    regions_from_fills,
+    robust_buffer,
     robust_difference,
+    robust_intersection,
     robust_union,
 )
+from .svg_parse import normalize_color, regions_from_fills
 
 
 @dataclass(frozen=True)
@@ -48,7 +51,7 @@ def scale_regions_to_mm(regions, target_width, target_height=None):
     """
     if not regions:
         raise ValueError('No regions to scale.')
-    min_x, min_y, max_x, max_y = robust_union([r.geometry for r in regions]).bounds
+    min_x, min_y, max_x, max_y = shapely.total_bounds([r.geometry for r in regions])
     scale = target_width / (max_x - min_x)
     if target_height:
         scale = min(scale, target_height / (max_y - min_y))
@@ -93,8 +96,8 @@ def _open(geometry, radius):
     Erase anything thinner than 2 * radius. Mitre joins keep sharp corners
     sharp, and clipping to the input stops them overshooting rounded tips.
     """
-    shrunk = geometry.buffer(-radius, join_style='mitre')
-    return shrunk.buffer(radius, join_style='mitre').intersection(geometry)
+    shrunk = robust_buffer(geometry, -radius, join_style='mitre')
+    return robust_intersection(robust_buffer(shrunk, radius, join_style='mitre'), geometry)
 
 
 def _without_pinholes(polygon, min_area):
@@ -173,13 +176,13 @@ def printability_warnings(regions, pyramid_size, safety_margin=0.5, max_colors=4
     clearance = pyramid_size / 2 + safety_margin
     for region in regions:
         label = f'Region {region.id} ({region.fill}, {region.geometry.area:.0f} mm^2)'
-        reachable = region.geometry.buffer(-clearance)
+        reachable = robust_buffer(region.geometry, -clearance)
         if reachable.is_empty:
             warnings.append(PrintWarning(
                 'no_grip', f'{label} is too narrow for any pyramid and will print flat.', region.id,
             ))
             continue
-        flat = 1 - reachable.buffer(clearance).area / region.geometry.area
+        flat = 1 - robust_buffer(reachable, clearance).area / region.geometry.area
         if flat > flat_fraction:
             warnings.append(PrintWarning(
                 'partial_grip',

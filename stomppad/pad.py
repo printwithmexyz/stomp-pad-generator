@@ -3,12 +3,14 @@
 from dataclasses import dataclass, field, fields, replace
 
 import numpy as np
+import shapely
 from shapely import affinity
 from shapely.geometry import Polygon
 
 from .packing import PackingSettings, pack_regions
 from .refine import CleanupSettings, clean_regions, printability_warnings, scale_regions_to_mm
-from .svg_parse import parse_svg, polygon_parts, regions_from_fills, robust_union
+from .overlay import polygon_parts, robust_buffer, robust_difference, robust_union
+from .svg_parse import parse_svg, regions_from_fills
 
 VOID_MODES = ('through', 'recess')
 
@@ -130,7 +132,7 @@ def _as_one_color(regions):
 
 def _fit_to_size(regions, target_width, target_height):
     """Cleanup can trim the extremes, so stretch back to the size that was asked for."""
-    min_x, min_y, max_x, max_y = robust_union([r.geometry for r in regions]).bounds
+    min_x, min_y, max_x, max_y = shapely.total_bounds([r.geometry for r in regions])
     scale = target_width / (max_x - min_x)
     if target_height:
         scale = min(scale, target_height / (max_y - min_y))
@@ -143,13 +145,13 @@ def _fit_to_size(regions, target_width, target_height):
 
 def _close_gaps(geometry, radius):
     """Bridge gaps narrower than 2 * radius so neighbouring colors share one floor."""
-    grown = geometry.buffer(radius, join_style='mitre')
-    return grown.buffer(-radius, join_style='mitre')
+    grown = robust_buffer(geometry, radius, join_style='mitre')
+    return robust_buffer(grown, -radius, join_style='mitre')
 
 
 def _enclosed_holes(art):
     outlines = robust_union([Polygon(polygon.exterior) for polygon in polygon_parts(art)])
-    return outlines.difference(art)
+    return robust_difference(outlines, art)
 
 
 def _assembly_notes(art, voids, settings):
@@ -160,13 +162,16 @@ def _assembly_notes(art, voids, settings):
 
     footprint_source = robust_union([art, voids]) if settings.recesses_voids else art
     if not settings.recesses_voids:
-        filled_in = [v for v in polygon_parts(voids) if v.buffer(-settings.outline_offset).is_empty]
+        filled_in = [
+            void for void in polygon_parts(voids)
+            if robust_buffer(void, -settings.outline_offset).is_empty
+        ]
         if filled_in:
             notes.append(
                 f'{len(filled_in)} hole(s) are narrower than twice the outline offset, so the rim '
                 'fills them in. Recess the holes or reduce the outline offset to keep them.'
             )
-    pieces = len(polygon_parts(footprint_source.buffer(settings.outline_offset)))
+    pieces = len(polygon_parts(robust_buffer(footprint_source, settings.outline_offset)))
     if pieces > 1:
         notes.append(f'The pad prints as {pieces} separate pieces.')
     return notes

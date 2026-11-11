@@ -10,10 +10,17 @@ import re
 
 import numpy as np
 import shapely
-from shapely.errors import GEOSException
 from shapely.geometry import LineString, Polygon, box
-from shapely.ops import polygonize, unary_union
+from shapely.ops import polygonize
 from svg.path import parse_path
+
+from .overlay import (
+    polygon_parts,
+    robust_buffer,
+    robust_difference,
+    robust_intersection,
+    robust_union,
+)
 
 try:
     import defusedxml.ElementTree as ET
@@ -133,29 +140,6 @@ class _WalkContext:
     def warn(self, message):
         if message not in self.warnings:
             self.warnings.append(message)
-
-
-def _snap_grid(geometries):
-    min_x, min_y, max_x, max_y = shapely.total_bounds(geometries)
-    return max(max_x - min_x, max_y - min_y) * 1e-7
-
-
-def robust_union(geometries):
-    """Union that survives GEOS topology errors by retrying on a fine snap grid."""
-    geometries = list(geometries)
-    try:
-        return unary_union(geometries)
-    except GEOSException:
-        valid = [shapely.make_valid(g) for g in geometries]
-        return shapely.union_all(valid, grid_size=_snap_grid(valid))
-
-
-def robust_difference(geometry, cutter):
-    try:
-        return geometry.difference(cutter)
-    except GEOSException:
-        valid = [shapely.make_valid(geometry), shapely.make_valid(cutter)]
-        return shapely.difference(*valid, grid_size=_snap_grid(valid))
 
 
 def _local_name(tag):
@@ -470,7 +454,7 @@ def _fill_geometry(subpaths, fill_rule):
         if simple.is_valid:
             return simple
     edges = _ring_edges(rings)
-    faces = polygonize(unary_union([LineString(ring) for ring in rings]))
+    faces = polygonize(robust_union([LineString(ring) for ring in rings]))
     filled = [f for f in faces if _is_filled(f.representative_point(), edges, fill_rule)]
     return robust_union(filled) if filled else None
 
@@ -497,8 +481,9 @@ def _stroke_geometry(subpaths, width, style):
     for subpath in subpaths:
         points = _closed_ring(subpath.points) if subpath.closed else subpath.points
         sharp = join == 'mitre' and _has_corner_past_miter_limit(points, subpath.closed, miter_limit)
-        outlines.append(LineString(points).buffer(
-            width / 2, cap_style=cap, join_style='bevel' if sharp else join, mitre_limit=miter_limit,
+        outlines.append(robust_buffer(
+            LineString(points), width / 2,
+            cap_style=cap, join_style='bevel' if sharp else join, mitre_limit=miter_limit,
         ))
     return robust_union(outlines)
 
@@ -561,7 +546,7 @@ def _parse_viewbox(root):
 
 
 def _is_canvas_rectangle(geometry, frame):
-    covers_canvas = geometry.intersection(frame).area >= BACKGROUND_COVERAGE * frame.area
+    covers_canvas = robust_intersection(geometry, frame).area >= BACKGROUND_COVERAGE * frame.area
     is_rectangle = geometry.area >= BACKGROUND_RECTANGULARITY * box(*geometry.bounds).area
     return covers_canvas and is_rectangle
 
@@ -593,12 +578,6 @@ def _visible_by_fill(paint):
         if not shown.is_empty:
             visible.setdefault(entry.fill, []).append(shown)
     return {fill: robust_union(parts) for fill, parts in visible.items()}
-
-
-def polygon_parts(geometry):
-    if geometry.geom_type == 'Polygon':
-        return [] if geometry.is_empty else [geometry]
-    return [part for g in getattr(geometry, 'geoms', []) for part in polygon_parts(g)]
 
 
 def regions_from_fills(geometry_by_fill):
