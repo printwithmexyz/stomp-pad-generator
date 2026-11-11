@@ -11,6 +11,65 @@ section below into the GitHub release body.
 
 ## [Unreleased]
 
+### Added
+
+- **`stomppad/` package** replaces `pyramid_position_calculator.py` as the
+  shared geometry pipeline, with a pytest suite (`python -m pytest`).
+- **Hole toggle.** Holes enclosed by the artwork either cut through the pad
+  or are recessed to a set depth below the pyramid floor. In the desktop
+  Parameters tab, the web form, and at the top of each `.scad` as
+  `recess_voids` / `recess_depth`.
+- **Notes in the console** for dropped backgrounds, trimmed detail, regions
+  too narrow for pyramids, holes the rim fills in, and how many separate
+  pieces the pad prints as.
+- **Keep background** option for SVGs whose full-canvas rectangle is the pad
+  itself.
+- `pyclipper` is a new dependency (desktop `requirements_bulk_processor.txt`;
+  the web app loads it from Pyodide).
+- **Multicolor bodies and 3MF export in the `stomppad` package** (not in the
+  apps yet). A pad splits into a base plus one body per other color, each
+  owning the top `color_depth` of the floor and its pyramids. The `.scad`
+  renders any one body with `-D part=N`, and `stomppad.threemf` packs the
+  body STLs into a 3MF whose parts carry Bambu Studio filament slots.
+
+### Changed
+
+- **SVGs are read the way a browser paints them**: nested transforms, CSS
+  classes and inline styles, fill rules, strokes, opacity, paint order, unit
+  and percent lengths. Full-canvas background rectangles are dropped, and
+  slivers too small to print are removed.
+- **The `.scad` carries its geometry inline** and no longer imports the SVG.
+  The SVG is no longer copied to the output folder, and the web app no longer
+  offers it as a download.
+- **Desktop cache** is keyed on the SVG and every setting. Old
+  `cache_data.json` files are ignored.
+- **Cleanup no longer leaves gaps between colors.** Detail too small to
+  print that other colors surround is absorbed by a neighbour.
+- **STL renders fail loudly** when OpenSCAD reports leaving a shape out,
+  instead of saving an STL with material missing.
+- Pyramid bases are checked in the shape the `.scad` draws them, so
+  `Pyramid Style` values other than 4 fit properly.
+
+### Fixed
+
+- Holes in the artwork were filled with pyramids.
+- `transform` attributes were ignored, so pyramids and outline could disagree.
+- A background rectangle swallowed the logo.
+- Separate shapes were stitched into one outline.
+- SVGs without an `xmlns`, or with a comma-separated `viewBox`, failed.
+- Pyramid rotation was mirrored on diagonal strokes.
+- The same SVG could produce a different pyramid count from run to run.
+- The desktop cache returned stale results after a parameter change.
+- Shapes that meet at a single point (two squares corner to corner) could
+  make OpenSCAD drop the cavity cut and render a solid slab.
+- The web app could lose its Python runtime on roughly 3 in 100 logos and
+  hang. Geometry operations can no longer trigger that, and the page reports
+  it if it ever happens.
+
+### Removed
+
+- `pyramid_position_calculator.py` and `requirements_pyramid_calc.txt`.
+
 ## [0.1.0] — 2026-04-24
 
 First public-ready release. The project now ships two interfaces backed by

@@ -4,6 +4,133 @@
 separate review gate (max 5 files/response, `code-review-tester` after each
 logical chunk, `readme-auditor` after doc-affecting changes).
 
+## Revision 2026-11-11 (supersedes the sections below where they conflict)
+
+Scope for this round is correct SVG handling, multicolor, and 3MF. Decisions
+changed in the second interview:
+
+| Topic | Was | Now |
+|---|---|---|
+| Interactive editor (Phase 2) | In scope, web + desktop | **Deferred.** Manual tweaks are a region list (drop / recolor by id), not a canvas editor. |
+| Who reads the SVG | Python for packing, OpenSCAD `import()` for the body | **Python only.** Shapes are written into the `.scad` as polygons. Two parsers disagreeing caused the transform and Y-flip bugs, and `import()` cannot drop backgrounds or split colors. |
+| Shapes inside shapes | Even-odd nesting across elements decides hole vs body | **Paint order.** Regions are what a browser would show: later elements cover earlier ones, fill rules decide holes within a path. Anything painted in the dropped background's color, or in a listed void color, cuts a hole. |
+| Color layout | Base is a colorable body | **Shared base, colored top.** One color for the bottom layers and rim; each color region owns its top layers and pyramids. |
+| 3MF | Generic only | **Generic plus Bambu part-to-filament metadata**, format to be verified against a real Bambu Studio export. |
+| Holes in the artwork | Always cut through | **Toggle.** `void_mode='through'` cuts enclosed holes through the pad, rim and all. `void_mode='recess'` keeps a floor `recess_depth` below the surface the pyramids stand on, so islands inside a hole stay attached. A recess as deep as the base falls back to through. |
+
+Phases, each a review gate:
+
+- **A. Regions (done, not wired in).** `stomppad/svg_parse.py` and
+  `stomppad/refine.py`: transforms, CSS classes, fill rules, strokes, paint
+  order, background drop, void fills, scaling to mm, cleanup (near-duplicate
+  colors, slivers, specks, pinholes), printability warnings, drop / recolor
+  overrides. Tests in `tests/test_svg_regions.py` (`python -m pytest`).
+- **B1. Pad build (done, not wired in).** `stomppad/pad.py` is the one entry
+  point: `build_pad(svg, PadSettings)` returns a `PadDesign`, and
+  `stomppad/openscad.py` writes it as a `.scad` with inline polygons and no
+  SVG import. `stomppad/packing.py` places pyramids per region on one shared
+  hex grid. Tests in `tests/test_pad_build.py`.
+- **B2. Desktop (done).** The bulk processor calls `stomppad.batch`, the
+  Parameters tab has the hole toggle and recess depth, and the cache is keyed
+  on the SVG and every setting.
+- **B3. Web (done).** `prepare.js` copies the package into
+  `public/stomppad/` with a manifest, `main.js` calls `build_pad`, the page
+  has the same controls, and the 2D preview draws holes. Checked end to end
+  in Chrome. `pyramid_position_calculator.py` is deleted. STL rendering in the
+  browser has not been exercised since the change.
+- **C1. Multicolor core (done, not wired in).** `PadDesign.bodies` splits
+  the pad into a base and one body per other color. The `.scad` renders the
+  whole pad or one body (`-D part=N`). `stomppad/threemf.py` packs the body
+  STLs into a 3MF with Bambu filament assignments, and `stomppad.batch` has
+  `render_bodies` and `export_3mf`. New settings: `color_depth` (default
+  0.6 mm) and `base_color` (default: the color covering the most area).
+  Cleanup now hands removed detail that other colors surround to a
+  neighbour. Tests in `tests/test_threemf.py` and the bodies section of
+  `tests/test_pad_build.py`.
+- **C2. Multicolor in the apps.** Desktop: a multicolor switch, color depth,
+  base color, and STL-set / 3MF output. Web: the same, rendering each body in
+  openscad-wasm and building the 3MF in Pyodide. The web renderer also needs
+  to fail on OpenSCAD `ERROR:` lines the way `batch.render_stl` now does.
+- **D. Region list UI.** Show regions, warnings, and drop / recolor controls
+  in web and desktop.
+
+Fixed on the way through B1, both present in the old
+`pyramid_position_calculator.py`:
+
+- Pyramid rotation was mirrored. Angles were measured with Y down and applied
+  with Y up, so on a diagonal stroke the pyramids turned the wrong way and
+  could overhang a thin one. Coordinates are now Y up from the start.
+- The skeleton step breaks ties at random, so the same SVG could give a
+  different pyramid count from run to run. It is now seeded.
+
+Decided in C1:
+
+- **Base color.** The base takes the largest color by default, so the number
+  of filaments equals the number of colors. `base_color` overrides it, and a
+  color no region uses adds a filament.
+- **Removed slivers.** A neighbour absorbs them (this was the open question
+  below). Only what lies where kept colors face each other across an
+  unprintable gap is considered, and a piece there is absorbed when kept
+  colors border at least 80% of its outline. It goes to the color it borders
+  most. Whatever cleanup removed from the outer edge stays removed. Without
+  this a dropped speck where colors meet became a hole through the pad, and a
+  dropped hairline showed the base color.
+- **Base color within merge tolerance.** A `base_color` that cleanup would
+  have merged into one of the art's colors means that color.
+- **3MF colors.** Parts are named after their colors and carry Bambu filament
+  slots. Standard 3MF colors are optional (`standard_colors=True`) and off by
+  default: recent Bambu Studio versions open a color-matching dialog for
+  them and discard the slots.
+
+Known gaps:
+
+- **The 3MF has not been opened in Bambu Studio.** Its layout follows the
+  importer's source, and lib3mf (strict mode) and trimesh read it back as
+  closed, correctly oriented meshes. Bambu Studio binaries could not be
+  downloaded into the test environment.
+- Body renders were checked on 70 real icons (31 of them multicolor, 236
+  renders, both hole modes) with the OpenSCAD WebAssembly build: no shape
+  dropped, and the bodies add up to the whole pad within 0.03%. Earlier
+  rounds of the same sweep are what found the point-contact and
+  crowded-corner failures described in `docs/architecture.md`. Native
+  OpenSCAD has not been run.
+- The multicolor code was scanned in Pyodide twice over 354 real icons, both
+  hole modes: 0 crashes.
+- OrcaSlicer shares Bambu Studio's 3MF reader by descent, but its source was
+  not checked.
+
+- **GEOS errors kill Pyodide (handled).** In Pyodide (checked on 0.26.4 and
+  0.29.0) a C++ exception from GEOS is not turned into a Python exception. It
+  ends the runtime and the page needs a reload. With GEOS buffers, 3 of 91
+  real icons crashed. `stomppad/overlay.py` now runs set operations on a
+  fixed-precision grid, offsets and repairs with Clipper (`pyclipper`), and
+  simplifies with its own Douglas-Peucker pass, so GEOS is never asked to do
+  anything it can fail at. The simplifier was the last to go: GEOS's crashed
+  on one icon (simple-icons `criticalrole.svg`) only inside a batch, never
+  alone. Measured in Pyodide on 354 real icons, both hole modes, three
+  separate passes over the final code: 0 crashes. The page still detects a
+  crash and asks for a reload if one ever happens. Nothing proves no input
+  can trigger one, so new geometry code has to keep to the rule in
+  `docs/architecture.md`.
+- The suite passes inside Pyodide 0.26.4 (shapely 2.0.2, scikit-image 0.23.2)
+  apart from the desktop-only batch tests.
+- SVGs with DOCTYPE entity declarations (Illustrator "preserve editing
+  capabilities") are rejected with a clear error on both desktop and web.
+  Re-export as plain SVG.
+- A bevelled stroke corner comes out slightly fuller than a browser draws it,
+  because Clipper has no true bevel join.
+- Hostile or broken input is refused, not processed: shapes with NaN, infinite
+  or absurdly large coordinates are skipped with a warning, and settings
+  outside sane ranges (a 99999 mm pad, a 0.0001 mm skeleton grid) raise a
+  clear error before they can exhaust memory.
+- The web app has no automated tests. It is checked by driving the built
+  page in headless Chrome by hand.
+- Ignored without a warning: CSS `transform` in a `style` attribute, nested
+  `<svg>` viewports, `stroke-dasharray`, and the `color` property behind
+  `currentColor`.
+- A full-canvas plain rectangle under other art is always read as background.
+  If it is really the pad's base shape, pass `keep_background`.
+
 ## Decisions locked (from interview)
 
 | Decision | Choice |

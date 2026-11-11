@@ -42,6 +42,9 @@
             <label>Skeleton resolution
               <input type="number" name="skeleton_resolution" value="0.4" step="0.1" />
             </label>
+            <label class="checkbox" title="A plain rectangle covering the whole canvas under other artwork is normally dropped as a background">
+              <input type="checkbox" name="keep_background" /> Keep a full-canvas background rectangle
+            </label>
           </fieldset>
 
           <fieldset>
@@ -76,6 +79,19 @@
             </label>
             <label>Pyramid style ($fn)
               <input type="number" name="pyramid_style" value="4" step="1" />
+            </label>
+          </fieldset>
+
+          <fieldset>
+            <legend>Holes in artwork</legend>
+            <label class="checkbox" title="The hole goes all the way through. Anything inside it prints as a separate loose piece.">
+              <input type="radio" name="void_mode" value="through" checked /> Cut through the pad
+            </label>
+            <label class="checkbox" title="The hole keeps a floor, so everything stays one piece.">
+              <input type="radio" name="void_mode" value="recess" /> Recess, keeping a floor
+            </label>
+            <label>Recess depth (mm below the pyramid floor)
+              <input type="number" name="recess_depth" value="0.6" step="0.1" min="0" />
             </label>
           </fieldset>
 

@@ -17,6 +17,7 @@ a = Analysis(
         'shapely.affinity',
         'skimage.morphology',
         'scipy.spatial',
+        'pyclipper',
         'PIL.Image',
         'PIL.ImageTk',
     ],

@@ -10,134 +10,40 @@ from tkinter import ttk, filedialog, scrolledtext
 import json
 import queue
 import subprocess
-import shutil
 import multiprocessing
 from pathlib import Path
 from datetime import datetime
 import threading
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
-# Import the pyramid calculator functions
-from pyramid_position_calculator import (
-    parse_svg_to_polygon,
-    calculate_skeleton,
-    calculate_valid_pyramid_positions,
-    generate_openscad_with_positions,
-    save_debug_visualization
+from stomppad.batch import process_svg, render_stl, save_debug_visualization
+from stomppad.pad import PadSettings
+
+# Form fields that become PadSettings, named as PadSettings.from_params expects
+PARAMETER_NAMES = (
+    'target_width', 'target_height', 'samples_per_segment', 'skeleton_resolution', 'keep_background',
+    'pyramid_size', 'pyramid_spacing', 'safety_margin', 'include_rotation',
+    'base_thickness', 'outline_offset', 'outline_height', 'pyramid_height', 'pyramid_style',
+    'void_mode', 'recess_depth',
 )
 
 
 # ===== Module-level helpers (must be top-level for ProcessPoolExecutor pickling) =====
 
-def _save_cache(cache_file, polygon, svg_info, skeleton_points, valid_positions):
-    from shapely.geometry import mapping
-    cache_data = {
-        'polygon': mapping(polygon),
-        'svg_info': svg_info,
-        'skeleton_points': skeleton_points,
-        'valid_positions': valid_positions,
-        'timestamp': datetime.now().isoformat()
-    }
-    with open(cache_file, 'w') as f:
-        json.dump(cache_data, f, indent=2)
-
-
-def _load_cache(cache_file):
-    from shapely.geometry import shape
-    with open(cache_file, 'r') as f:
-        cache_data = json.load(f)
-    return {
-        'polygon': shape(cache_data['polygon']),
-        'svg_info': cache_data['svg_info'],
-        'skeleton_points': cache_data['skeleton_points'],
-        'valid_positions': cache_data['valid_positions']
-    }
-
-
-def _svg_worker(svg_file_path, output_path_str, cache_path_str, params, use_cache, log_queue):
+def _svg_worker(svg_file_path, output_path_str, cache_path_str, settings, log_queue):
     """Process pool worker: SVG -> .scad. Returns dict with status and scad path.
 
     Logs are pushed to log_queue (a multiprocessing Manager queue) prefixed with [filename].
     Caller is responsible for STL rendering — that runs in a separate thread pool.
+    cache_path_str is None when the cache is switched off.
     """
-    svg_file = Path(svg_file_path)
-    output_path = Path(output_path_str)
-    cache_path = Path(cache_path_str)
-    file_stem = svg_file.stem
+    file_stem = Path(svg_file_path).stem
 
     def log(msg):
         log_queue.put(f"[{file_stem}] {msg}")
 
     try:
-        file_cache_path = cache_path / file_stem
-        file_cache_path.mkdir(parents=True, exist_ok=True)
-        cache_svg = file_cache_path / svg_file.name
-        cache_data = file_cache_path / "cache_data.json"
-
-        cached_result = None
-        if use_cache and cache_data.exists():
-            log("Found cached data")
-            try:
-                cached_result = _load_cache(cache_data)
-                log("Using cached skeleton and positions")
-            except Exception as e:
-                log(f"Cache invalid, reprocessing: {e}")
-                cached_result = None
-
-        if cached_result is None:
-            log("Parsing SVG...")
-            polygon, svg_info = parse_svg_to_polygon(
-                str(svg_file),
-                target_width=params['target_width'],
-                target_height=params['target_height'] if params['target_height'] > 0 else None,
-                samples_per_segment=params['samples_per_segment'],
-                logger=log
-            )
-            log("Calculating skeleton...")
-            skeleton_points = calculate_skeleton(polygon, resolution=params['skeleton_resolution'])
-            log("Calculating pyramid positions...")
-            valid_positions = calculate_valid_pyramid_positions(
-                polygon,
-                pyramid_size=params['pyramid_size'],
-                pyramid_spacing=params['pyramid_spacing'],
-                target_width=params['target_width'],
-                include_rotation=params['include_rotation'],
-                safety_margin=params['safety_margin'],
-                skeleton_points=skeleton_points,
-                logger=log
-            )
-            log("Saving to cache...")
-            _save_cache(cache_data, polygon, svg_info, skeleton_points, valid_positions)
-            shutil.copy2(svg_file, cache_svg)
-        else:
-            polygon = cached_result['polygon']
-            svg_info = cached_result['svg_info']
-            valid_positions = cached_result['valid_positions']
-
-        output_svg = output_path / svg_file.name
-        if cache_svg.exists():
-            shutil.copy2(cache_svg, output_svg)
-        else:
-            shutil.copy2(svg_file, output_svg)
-
-        log("Generating OpenSCAD file...")
-        scad_output = output_path / f"{file_stem}.scad"
-        generate_openscad_with_positions(
-            svg_file.name,
-            valid_positions,
-            str(scad_output),
-            svg_info=svg_info,
-            logger=log,
-            target_width=params['target_width'],
-            base_thickness=params['base_thickness'],
-            outline_offset=params['outline_offset'],
-            outline_height=params['outline_height'],
-            pyramid_size=params['pyramid_size'],
-            pyramid_height=params['pyramid_height'],
-            pyramid_style=params['pyramid_style']
-        )
-        log(f"OpenSCAD file: {scad_output.name}")
-
+        scad_output = process_svg(svg_file_path, output_path_str, settings, cache_path_str, log)
         return {
             'success': True,
             'file_stem': file_stem,
@@ -164,25 +70,7 @@ def _stl_render(scad_file_path, stl_file_path, openscad_path, log_queue):
         log_queue.put(f"[{file_stem}] {msg}")
 
     log("Rendering STL...")
-    try:
-        result = subprocess.run(
-            [openscad_path, "-o", stl_file_path, scad_file_path],
-            capture_output=True, text=True, timeout=300
-        )
-        if result.returncode == 0:
-            log(f"STL file: {Path(stl_file_path).name}")
-            return True
-        log(f"OpenSCAD error: {result.stderr.strip()}")
-        return False
-    except subprocess.TimeoutExpired:
-        log("Timeout rendering STL")
-        return False
-    except FileNotFoundError:
-        log(f"OpenSCAD executable not found: {openscad_path}")
-        return False
-    except Exception as e:
-        log(f"STL render error: {e}")
-        return False
+    return render_stl(scad_file_path, stl_file_path, openscad_path, log)
 
 
 class BulkProcessorGUI:
@@ -200,11 +88,12 @@ class BulkProcessorGUI:
         self.cache_folder = tk.StringVar(value=".cache")
         self.openscad_path = tk.StringVar(value="openscad")
 
-        # Parameters (matching pyramid_position_calculator.py)
+        # Parameters (see PARAMETER_NAMES)
         self.target_width = tk.DoubleVar(value=152)
         self.target_height = tk.DoubleVar(value=0)  # 0 = auto (maintain aspect ratio)
         self.samples_per_segment = tk.IntVar(value=40)
         self.skeleton_resolution = tk.DoubleVar(value=0.4)
+        self.keep_background = tk.BooleanVar(value=False)
 
         self.pyramid_size = tk.DoubleVar(value=3)
         self.pyramid_spacing = tk.DoubleVar(value=1.5)
@@ -216,6 +105,9 @@ class BulkProcessorGUI:
         self.outline_height = tk.DoubleVar(value=2)
         self.pyramid_height = tk.DoubleVar(value=3.5)
         self.pyramid_style = tk.IntVar(value=4)
+
+        self.void_mode = tk.StringVar(value='through')
+        self.recess_depth = tk.DoubleVar(value=0.6)
 
         self.generate_stl = tk.BooleanVar(value=True)
         self.use_cache = tk.BooleanVar(value=True)
@@ -231,6 +123,34 @@ class BulkProcessorGUI:
         self.is_processing = False
         self.preview_continue_event = threading.Event()
         self.preview_approved = False
+
+        # Everything saved to the config file, keyed by its name there
+        self.persisted_vars = {
+            'input_folder': self.input_folder,
+            'output_folder': self.output_folder,
+            'cache_folder': self.cache_folder,
+            'openscad_path': self.openscad_path,
+            'target_width': self.target_width,
+            'target_height': self.target_height,
+            'samples_per_segment': self.samples_per_segment,
+            'skeleton_resolution': self.skeleton_resolution,
+            'keep_background': self.keep_background,
+            'pyramid_size': self.pyramid_size,
+            'pyramid_spacing': self.pyramid_spacing,
+            'safety_margin': self.safety_margin,
+            'include_rotation': self.include_rotation,
+            'base_thickness': self.base_thickness,
+            'outline_offset': self.outline_offset,
+            'outline_height': self.outline_height,
+            'pyramid_height': self.pyramid_height,
+            'pyramid_style': self.pyramid_style,
+            'void_mode': self.void_mode,
+            'recess_depth': self.recess_depth,
+            'generate_stl': self.generate_stl,
+            'use_cache': self.use_cache,
+            'preview_debug': self.preview_debug,
+            'num_threads': self.num_threads,
+        }
 
         # Load saved configuration
         self.load_config()
@@ -329,11 +249,14 @@ class BulkProcessorGUI:
         ttk.Label(group1, text="Skeleton Resolution:").grid(row=3, column=0, sticky='w')
         ttk.Entry(group1, textvariable=self.skeleton_resolution, width=15).grid(row=3, column=1, padx=5)
 
+        ttk.Checkbutton(group1, text="Keep a full-canvas background rectangle as part of the pad",
+                       variable=self.keep_background).grid(row=4, column=0, columnspan=2, sticky='w')
+
         # Scaling note
         scaling_note = "SVG is scaled to fit within target dimensions while maintaining aspect ratio.\n" \
                        "The final size will be the maximum that fits both width and height constraints."
         ttk.Label(group1, text=scaling_note, wraplength=400, foreground='gray').grid(
-            row=4, column=0, columnspan=2, sticky='w', pady=(10, 0))
+            row=5, column=0, columnspan=2, sticky='w', pady=(10, 0))
 
         # Pyramid Packing Parameters
         group2 = ttk.LabelFrame(parent, text="Pyramid Packing", padding=10)
@@ -369,6 +292,26 @@ class BulkProcessorGUI:
 
         ttk.Label(group3, text="Pyramid Style ($fn):").grid(row=4, column=0, sticky='w')
         ttk.Entry(group3, textvariable=self.pyramid_style, width=15).grid(row=4, column=1, padx=5)
+
+        # Holes enclosed by the artwork (a letter's counter, the inside of a ring)
+        group4 = ttk.LabelFrame(parent, text="Holes in Artwork", padding=10)
+        group4.grid(row=3, column=0, sticky='ew', padx=10, pady=5)
+
+        ttk.Radiobutton(group4, text="Cut through the pad", variable=self.void_mode,
+                        value='through').grid(row=0, column=0, columnspan=2, sticky='w')
+        ttk.Radiobutton(group4, text="Recess, keeping a floor", variable=self.void_mode,
+                        value='recess').grid(row=1, column=0, columnspan=2, sticky='w')
+
+        ttk.Label(group4, text="Recess Depth:").grid(row=2, column=0, sticky='w')
+        depth_frame = ttk.Frame(group4)
+        depth_frame.grid(row=2, column=1, sticky='w', padx=5)
+        ttk.Entry(depth_frame, textvariable=self.recess_depth, width=15).pack(side='left')
+        ttk.Label(depth_frame, text="(mm below the pyramid floor)", foreground='gray').pack(side='left', padx=5)
+
+        holes_note = "Cut through leaves anything inside a hole as a separate loose piece.\n" \
+                     "Recess keeps it attached. A depth of the base thickness or more cuts through."
+        ttk.Label(group4, text=holes_note, wraplength=400, foreground='gray').grid(
+            row=3, column=0, columnspan=2, sticky='w', pady=(10, 0))
 
     def setup_console_tab(self, parent):
         # Log output
@@ -481,7 +424,7 @@ class BulkProcessorGUI:
             # Info label
             ttk.Label(dialog, text=f"Preview for: {filename}",
                      font=('TkDefaultFont', 10, 'bold')).pack(pady=5)
-            ttk.Label(dialog, text="Review the debug visualization showing polygon boundary, skeleton, and pyramid positions.",
+            ttk.Label(dialog, text="Review the debug visualization showing the artwork, holes, centerline, and pyramid bases.",
                      wraplength=500).pack(pady=5)
 
             # Button frame
@@ -659,8 +602,8 @@ class BulkProcessorGUI:
         to bypass the GIL. STL render is subprocess.run, so threads suffice and they overlap
         with SVG worker processes for higher throughput.
         """
-        params = self._collect_params()
-        use_cache = self.use_cache.get()
+        settings = self._collect_settings()
+        worker_cache_path = str(cache_path) if self.use_cache.get() else None
         generate_stl = self.generate_stl.get()
         openscad_path = self.openscad_path.get()
 
@@ -696,8 +639,8 @@ class BulkProcessorGUI:
 
         try:
             svg_futures = {
-                svg_pool.submit(_svg_worker, str(f), str(output_path), str(cache_path),
-                                params, use_cache, log_queue): f
+                svg_pool.submit(_svg_worker, str(f), str(output_path), worker_cache_path,
+                                settings, log_queue): f
                 for f in svg_files
             }
 
@@ -707,7 +650,13 @@ class BulkProcessorGUI:
                         f.cancel()
                     break
 
-                result = future.result()
+                try:
+                    result = future.result()
+                except Exception as e:
+                    # A worker process that dies takes its result with it.
+                    failed_name = svg_futures[future].name
+                    result = {'success': False, 'file_stem': failed_name, 'scad_output': None, 'error': str(e)}
+                    self.log(f"[{failed_name}] ERROR: worker failed: {e}")
                 bump_progress()
 
                 if result['success']:
@@ -737,23 +686,11 @@ class BulkProcessorGUI:
 
         self._finalize_run(files_processed[0], len(svg_files))
 
-    def _collect_params(self):
-        """Snapshot all tk vars to a plain dict (picklable, safe for worker processes)."""
-        return {
-            'target_width': self.target_width.get(),
-            'target_height': self.target_height.get(),
-            'samples_per_segment': self.samples_per_segment.get(),
-            'skeleton_resolution': self.skeleton_resolution.get(),
-            'pyramid_size': self.pyramid_size.get(),
-            'pyramid_spacing': self.pyramid_spacing.get(),
-            'safety_margin': self.safety_margin.get(),
-            'include_rotation': self.include_rotation.get(),
-            'base_thickness': self.base_thickness.get(),
-            'outline_offset': self.outline_offset.get(),
-            'outline_height': self.outline_height.get(),
-            'pyramid_height': self.pyramid_height.get(),
-            'pyramid_style': self.pyramid_style.get(),
-        }
+    def _collect_settings(self):
+        """Snapshot the parameter fields as PadSettings (picklable, safe for worker processes)."""
+        return PadSettings.from_params(
+            {name: self.persisted_vars[name].get() for name in PARAMETER_NAMES}
+        )
 
     def _finalize_run(self, files_processed, total):
         if self.stop_requested.is_set():
@@ -771,203 +708,39 @@ class BulkProcessorGUI:
         self.update_status("Complete!", 'green')
 
     def process_single_svg(self, svg_file, output_path, cache_path):
-        """Process a single SVG file"""
-        file_stem = svg_file.stem
-
-        # Create cache subfolder for this file
-        file_cache_path = cache_path / file_stem
-        file_cache_path.mkdir(parents=True, exist_ok=True)
-
-        # Cache file paths
-        cache_svg = file_cache_path / svg_file.name
-        cache_data = file_cache_path / "cache_data.json"
-
-        # Check if we can use cached data
-        use_cached = False
-        if self.use_cache.get() and cache_data.exists():
-            self.log(f"  Found cached data for {file_stem}")
-            try:
-                cached_result = self.load_from_cache(cache_data)
-                use_cached = True
-                self.log(f"  Using cached skeleton and positions")
-            except Exception as e:
-                self.log(f"  Cache invalid, reprocessing: {str(e)}")
-                use_cached = False
-
-        if not use_cached:
-            # Parse SVG and calculate positions
-            self.log(f"  Parsing SVG...")
-            polygon, svg_info = parse_svg_to_polygon(
-                str(svg_file),
-                target_width=self.target_width.get(),
-                target_height=self.target_height.get() if self.target_height.get() > 0 else None,
-                samples_per_segment=self.samples_per_segment.get(),
-                logger=self.log
-            )
-
-            self.log(f"  Calculating skeleton...")
-            skeleton_points = calculate_skeleton(
-                polygon,
-                resolution=self.skeleton_resolution.get()
-            )
-
-            self.log(f"  Calculating pyramid positions...")
-            valid_positions = calculate_valid_pyramid_positions(
-                polygon,
-                pyramid_size=self.pyramid_size.get(),
-                pyramid_spacing=self.pyramid_spacing.get(),
-                target_width=self.target_width.get(),
-                include_rotation=self.include_rotation.get(),
-                safety_margin=self.safety_margin.get(),
-                skeleton_points=skeleton_points,
-                logger=self.log
-            )
-
-            # Save to cache
-            self.log(f"  Saving to cache...")
-            self.save_to_cache(cache_data, polygon, svg_info, skeleton_points, valid_positions)
-
-            # Copy SVG to cache folder
-            shutil.copy2(svg_file, cache_svg)
-        else:
-            # Use cached data
-            polygon = cached_result['polygon']
-            svg_info = cached_result['svg_info']
-            skeleton_points = cached_result['skeleton_points']
-            valid_positions = cached_result['valid_positions']
-
-        # Show debug visualization preview if enabled
-        if self.preview_debug.get():
-            self.log(f"  Generating debug visualization...")
-            debug_viz_path = output_path / f"{file_stem}_debug.png"
-            save_debug_visualization(polygon, skeleton_points, valid_positions, str(debug_viz_path), logger=self.log)
-            self.log(f"  Waiting for preview approval...")
-
-            approved = self.show_preview_dialog(str(debug_viz_path), svg_file.name)
-
-            if self.stop_requested.is_set():
-                self.log(f"  Processing stopped by user")
-                raise Exception("Processing stopped by user")
-
-            if not approved:
-                self.log(f"  ✗ Skipped by user")
-                return  # Skip this file
-
-            self.log(f"  ✓ Approved, continuing...")
-
-        # Copy SVG to output folder so OpenSCAD can find it
-        output_svg = output_path / svg_file.name
-        if cache_svg.exists():
-            shutil.copy2(cache_svg, output_svg)
-        else:
-            shutil.copy2(svg_file, output_svg)
-
-        # Generate OpenSCAD file
-        self.log(f"  Generating OpenSCAD file...")
-        scad_output = output_path / f"{file_stem}.scad"
-
-        # Use just the filename (not full path) so OpenSCAD looks in same directory
-        generate_openscad_with_positions(
-            svg_file.name,  # Just the filename, not full path
-            valid_positions,
-            str(scad_output),
-            svg_info=svg_info,
-            logger=self.log,
-            target_width=self.target_width.get(),
-            base_thickness=self.base_thickness.get(),
-            outline_offset=self.outline_offset.get(),
-            outline_height=self.outline_height.get(),
-            pyramid_size=self.pyramid_size.get(),
-            pyramid_height=self.pyramid_height.get(),
-            pyramid_style=self.pyramid_style.get()
+        """Process a single SVG file in-process, pausing for preview approval if enabled."""
+        scad_output = process_svg(
+            svg_file, output_path, self._collect_settings(),
+            cache_dir=cache_path if self.use_cache.get() else None,
+            log=self.log,
+            approve=self._preview_approver(svg_file, output_path) if self.preview_debug.get() else None,
         )
+        if scad_output is None:
+            self.log("  ✗ Skipped by user")
+            return
 
-        self.log(f"  ✓ OpenSCAD file: {scad_output.name}")
-        self.log(f"  ✓ SVG copied to output: {output_svg.name}")
-
-        # Generate STL if requested
         if self.generate_stl.get():
-            self.log(f"  Rendering STL...")
-            stl_output = output_path / f"{file_stem}.stl"
+            self.log("  Rendering STL...")
+            if not render_stl(scad_output, scad_output.with_suffix('.stl'),
+                              self.openscad_path.get(), self.log):
+                self.log("  ✗ STL rendering failed")
 
-            success = self.render_stl(scad_output, stl_output)
-            if success:
-                self.log(f"  ✓ STL file: {stl_output.name}")
-            else:
-                self.log(f"  ✗ STL rendering failed")
-
-    def save_to_cache(self, cache_file, polygon, svg_info, skeleton_points, valid_positions):
-        _save_cache(cache_file, polygon, svg_info, skeleton_points, valid_positions)
-
-    def load_from_cache(self, cache_file):
-        return _load_cache(cache_file)
-
-    def render_stl(self, scad_file, stl_file):
-        """Render OpenSCAD file to STL using headless mode"""
-        try:
-            cmd = [
-                self.openscad_path.get(),
-                "-o", str(stl_file),
-                str(scad_file)
-            ]
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout
-            )
-
-            if result.returncode == 0:
-                return True
-            else:
-                self.log(f"    OpenSCAD error: {result.stderr}")
-                return False
-
-        except subprocess.TimeoutExpired:
-            self.log(f"    Timeout rendering STL")
-            return False
-        except FileNotFoundError:
-            self.log(f"    OpenSCAD executable not found: {self.openscad_path.get()}")
-            return False
-        except Exception as e:
-            self.log(f"    Error: {str(e)}")
-            return False
+    def _preview_approver(self, svg_file, output_path):
+        """Callback for process_svg: show the debug picture and wait for the user's verdict."""
+        def approve(design):
+            debug_viz_path = output_path / f"{svg_file.stem}_debug.png"
+            save_debug_visualization(design, str(debug_viz_path), self.log)
+            self.log("  Waiting for preview approval...")
+            approved = self.show_preview_dialog(str(debug_viz_path), svg_file.name)
+            if self.stop_requested.is_set():
+                self.log("  Processing stopped by user")
+                raise Exception("Processing stopped by user")
+            return approved
+        return approve
 
     def save_config(self):
         """Save current settings to config file"""
-        config = {
-            # Paths
-            'input_folder': self.input_folder.get(),
-            'output_folder': self.output_folder.get(),
-            'cache_folder': self.cache_folder.get(),
-            'openscad_path': self.openscad_path.get(),
-
-            # SVG Processing
-            'target_width': self.target_width.get(),
-            'target_height': self.target_height.get(),
-            'samples_per_segment': self.samples_per_segment.get(),
-            'skeleton_resolution': self.skeleton_resolution.get(),
-
-            # Pyramid Packing
-            'pyramid_size': self.pyramid_size.get(),
-            'pyramid_spacing': self.pyramid_spacing.get(),
-            'safety_margin': self.safety_margin.get(),
-            'include_rotation': self.include_rotation.get(),
-
-            # OpenSCAD Output
-            'base_thickness': self.base_thickness.get(),
-            'outline_offset': self.outline_offset.get(),
-            'outline_height': self.outline_height.get(),
-            'pyramid_height': self.pyramid_height.get(),
-            'pyramid_style': self.pyramid_style.get(),
-
-            # Options
-            'generate_stl': self.generate_stl.get(),
-            'use_cache': self.use_cache.get(),
-            'preview_debug': self.preview_debug.get(),
-            'num_threads': self.num_threads.get()
-        }
+        config = {name: var.get() for name, var in self.persisted_vars.items()}
 
         try:
             with open(self.config_file, 'w') as f:
@@ -984,57 +757,9 @@ class BulkProcessorGUI:
             with open(self.config_file, 'r') as f:
                 config = json.load(f)
 
-            # Load paths
-            if 'input_folder' in config:
-                self.input_folder.set(config['input_folder'])
-            if 'output_folder' in config:
-                self.output_folder.set(config['output_folder'])
-            if 'cache_folder' in config:
-                self.cache_folder.set(config['cache_folder'])
-            if 'openscad_path' in config:
-                self.openscad_path.set(config['openscad_path'])
-
-            # Load SVG Processing parameters
-            if 'target_width' in config:
-                self.target_width.set(config['target_width'])
-            if 'target_height' in config:
-                self.target_height.set(config['target_height'])
-            if 'samples_per_segment' in config:
-                self.samples_per_segment.set(config['samples_per_segment'])
-            if 'skeleton_resolution' in config:
-                self.skeleton_resolution.set(config['skeleton_resolution'])
-
-            # Load Pyramid Packing parameters
-            if 'pyramid_size' in config:
-                self.pyramid_size.set(config['pyramid_size'])
-            if 'pyramid_spacing' in config:
-                self.pyramid_spacing.set(config['pyramid_spacing'])
-            if 'safety_margin' in config:
-                self.safety_margin.set(config['safety_margin'])
-            if 'include_rotation' in config:
-                self.include_rotation.set(config['include_rotation'])
-
-            # Load OpenSCAD Output parameters
-            if 'base_thickness' in config:
-                self.base_thickness.set(config['base_thickness'])
-            if 'outline_offset' in config:
-                self.outline_offset.set(config['outline_offset'])
-            if 'outline_height' in config:
-                self.outline_height.set(config['outline_height'])
-            if 'pyramid_height' in config:
-                self.pyramid_height.set(config['pyramid_height'])
-            if 'pyramid_style' in config:
-                self.pyramid_style.set(config['pyramid_style'])
-
-            # Load options
-            if 'generate_stl' in config:
-                self.generate_stl.set(config['generate_stl'])
-            if 'use_cache' in config:
-                self.use_cache.set(config['use_cache'])
-            if 'preview_debug' in config:
-                self.preview_debug.set(config['preview_debug'])
-            if 'num_threads' in config:
-                self.num_threads.set(config['num_threads'])
+            for name, var in self.persisted_vars.items():
+                if name in config:
+                    var.set(config[name])
 
         except Exception as e:
             print(f"Warning: Could not load config: {e}")

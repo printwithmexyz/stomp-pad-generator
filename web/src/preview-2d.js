@@ -1,86 +1,107 @@
-// Mirrors the desktop app's save_debug_visualization: polygon outline,
-// skeleton points, pyramid centers + footprints. Pure Canvas2D — no deps.
+// Top-down drawing of a pad design, from PadDesign.preview(): the floor the
+// pyramids stand on, the holes in it, centerline points and pyramid bases.
+// Pure Canvas2D, no deps. Design coordinates are millimetres with Y up; the
+// canvas has Y down, so every point goes through toCanvas().
 
-export function draw2dPreview(canvas, data) {
-  const { rings, skeleton, positions, pyramidSize } = data;
+const FLOOR_FILL = '#dbe9fb';
+const FLOOR_OUTLINE = '#007aff';
+const RECESS_FILL = '#aebdd1';
+const HOLE_OUTLINE = '#8e8e93';
+const SKELETON_FILL = 'rgba(52, 199, 89, 0.55)';
+const PYRAMID_OUTLINE = 'rgba(255, 59, 48, 0.55)';
+const PYRAMID_CENTER = '#ff3b30';
+const MARGIN_PX = 12;
+
+function tracePolygons(ctx, polygons, toCanvas) {
+  ctx.beginPath();
+  for (const rings of polygons) {
+    for (const ring of rings) {
+      ring.forEach(([x, y], index) => {
+        const [px, py] = toCanvas(x, y);
+        if (index === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      });
+      ctx.closePath();
+    }
+  }
+}
+
+function drawPyramidBases(ctx, design, toCanvas) {
+  const cornerRadius = design.pyramid_size / Math.SQRT2;
+  const sides = design.pyramid_sides;
+  ctx.strokeStyle = PYRAMID_OUTLINE;
+  ctx.lineWidth = 0.8;
+  for (const [x, y, rotation] of design.positions) {
+    ctx.beginPath();
+    for (let corner = 0; corner < sides; corner++) {
+      const angle = ((45 + rotation + (corner * 360) / sides) * Math.PI) / 180;
+      const [px, py] = toCanvas(x + cornerRadius * Math.cos(angle), y + cornerRadius * Math.sin(angle));
+      if (corner === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = PYRAMID_CENTER;
+  for (const [x, y] of design.positions) {
+    const [px, py] = toCanvas(x, y);
+    ctx.beginPath();
+    ctx.arc(px, py, 1.4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+export function draw2dPreview(canvas, design) {
   const ctx = canvas.getContext('2d');
   const dpr = window.devicePixelRatio || 1;
 
   // Crisp on HiDPI: backing store at dpr, CSS dimensions stay logical.
-  const cssW = canvas.clientWidth;
-  const cssH = canvas.clientHeight;
-  canvas.width = cssW * dpr;
-  canvas.height = cssH * dpr;
+  const cssWidth = canvas.clientWidth;
+  const cssHeight = canvas.clientHeight;
+  canvas.width = cssWidth * dpr;
+  canvas.height = cssHeight * dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssWidth, cssHeight);
 
-  ctx.clearRect(0, 0, cssW, cssH);
+  if (!(design.width > 0) || !(design.height > 0)) return;
 
-  if (!rings || rings.length === 0) return;
+  // The art always starts at the origin, so width and height are its extent.
+  const scale = Math.min(
+    (cssWidth - 2 * MARGIN_PX) / design.width,
+    (cssHeight - 2 * MARGIN_PX) / design.height,
+  );
+  if (!(scale > 0)) return;  // a hidden or collapsed canvas has no room to draw in
+  const left = (cssWidth - design.width * scale) / 2;
+  const top = (cssHeight - design.height * scale) / 2;
+  const toCanvas = (x, y) => [left + x * scale, top + (design.height - y) * scale];
 
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (const ring of rings) {
-    for (const [x, y] of ring) {
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-    }
-  }
-  const w = maxX - minX, h = maxY - minY;
-  if (w <= 0 || h <= 0) return;
-
-  const pad = 12;
-  const scale = Math.min((cssW - 2 * pad) / w, (cssH - 2 * pad) / h);
-  const ox = pad + (cssW - 2 * pad - w * scale) / 2;
-  const oy = pad + (cssH - 2 * pad - h * scale) / 2;
-  const tx = (x) => ox + (x - minX) * scale;
-  const ty = (y) => oy + (y - minY) * scale;
-
-  // Polygon outlines (one path per ring — handles MultiPolygon SVGs)
-  ctx.strokeStyle = '#007aff';
+  // 'evenodd' leaves each polygon's hole rings unfilled.
+  tracePolygons(ctx, design.art, toCanvas);
+  ctx.fillStyle = FLOOR_FILL;
+  ctx.fill('evenodd');
+  ctx.strokeStyle = FLOOR_OUTLINE;
   ctx.lineWidth = 1.5;
-  for (const ring of rings) {
-    ctx.beginPath();
-    for (let i = 0; i < ring.length; i++) {
-      const [x, y] = ring[i];
-      if (i === 0) ctx.moveTo(tx(x), ty(y));
-      else ctx.lineTo(tx(x), ty(y));
-    }
-    ctx.closePath();
-    ctx.stroke();
+  ctx.stroke();
+
+  // A recessed hole still has a floor, so it is shaded. A through hole stays
+  // empty and only gets a dashed edge.
+  tracePolygons(ctx, design.voids, toCanvas);
+  if (design.voids_recessed) {
+    ctx.fillStyle = RECESS_FILL;
+    ctx.fill('evenodd');
+  }
+  ctx.strokeStyle = HOLE_OUTLINE;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 3]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.fillStyle = SKELETON_FILL;
+  for (const [x, y] of design.skeleton) {
+    const [px, py] = toCanvas(x, y);
+    ctx.fillRect(px - 0.5, py - 0.5, 1, 1);
   }
 
-  // Skeleton points
-  ctx.fillStyle = 'rgba(52, 199, 89, 0.55)';
-  for (const [x, y] of skeleton) {
-    ctx.fillRect(tx(x) - 0.5, ty(y) - 0.5, 1, 1);
-  }
-
-  // Pyramid footprints (rotated square diamond, mirrors create_pyramid_footprint)
-  ctx.strokeStyle = 'rgba(255, 59, 48, 0.4)';
-  ctx.lineWidth = 0.6;
-  const cornerDist = (pyramidSize / 2) * Math.SQRT2;
-  for (const pos of positions) {
-    const [x, y, rot = 0] = pos;
-    const baseAngle = (45 + rot) * Math.PI / 180;
-    ctx.beginPath();
-    for (let i = 0; i < 4; i++) {
-      const a = baseAngle + i * Math.PI / 2;
-      const cx = x + cornerDist * Math.cos(a);
-      const cy = y + cornerDist * Math.sin(a);
-      if (i === 0) ctx.moveTo(tx(cx), ty(cy));
-      else ctx.lineTo(tx(cx), ty(cy));
-    }
-    ctx.closePath();
-    ctx.stroke();
-  }
-
-  // Pyramid centers (red dots)
-  ctx.fillStyle = '#ff3b30';
-  for (const pos of positions) {
-    const [x, y] = pos;
-    ctx.beginPath();
-    ctx.arc(tx(x), ty(y), 1.6, 0, Math.PI * 2);
-    ctx.fill();
-  }
+  drawPyramidBases(ctx, design, toCanvas);
 }

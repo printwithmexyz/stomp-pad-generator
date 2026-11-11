@@ -1,12 +1,24 @@
-// Entry point. Bootstraps Pyodide, loads the calculator (synced from parent),
-// and processes uploaded SVGs sequentially via the same Python pipeline the
-// desktop app uses. STL rendering happens in-browser via openscad-wasm.
+// Entry point. Bootstraps Pyodide, loads the stomppad package (synced from the
+// parent project), and processes uploaded SVGs sequentially via the same
+// Python pipeline the desktop app uses. STL rendering happens in-browser via
+// openscad-wasm.
 
 import { renderStl } from './scad-renderer.js';
 import { draw2dPreview } from './preview-2d.js';
 import { mount3dPreview } from './preview-3d.js';
 
 const PYODIDE_VERSION = 'v0.26.4';
+const PACKAGE_URL = '/stomppad';
+
+// Form fields sent to PadSettings.from_params, which rejects names it doesn't know.
+const NUMBER_FIELDS = [
+  'target_width', 'target_height', 'samples_per_segment', 'skeleton_resolution',
+  'pyramid_size', 'pyramid_spacing', 'safety_margin',
+  'base_thickness', 'outline_offset', 'outline_height', 'pyramid_height', 'pyramid_style',
+  'recess_depth',
+];
+const WHOLE_NUMBER_FIELDS = new Set(['samples_per_segment', 'pyramid_style']);
+const CHECKBOX_FIELDS = ['include_rotation', 'keep_background'];
 
 const consoleEl = document.getElementById('console');
 const resultsEl = document.getElementById('results');
@@ -34,30 +46,56 @@ function disposeAll3d() {
   active3dHandles.clear();
 }
 
+// A C++ exception inside the geometry library kills Pyodide outright. Python
+// cannot catch it, and the runPythonAsync promise that was waiting never
+// settles: the error only surfaces as an uncaught global error. This promise
+// rejects when that happens, so callers can race against it.
+const runtimeCrash = new Promise((_, reject) => {
+  window.addEventListener('error', (event) => {
+    if (event.error && event.error.pyodide_fatal_error) reject(event.error);
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    if (event.reason && event.reason.pyodide_fatal_error) reject(event.reason);
+  });
+});
+runtimeCrash.catch(() => {});
+
 function log(msg) {
   const ts = new Date().toLocaleTimeString();
   consoleEl.textContent += `[${ts}] ${msg}\n`;
   consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 
-function readParams() {
+function readSettings() {
   const data = new FormData(paramsForm);
-  return {
-    target_width: parseFloat(data.get('target_width')),
-    target_height: parseFloat(data.get('target_height')),
-    samples_per_segment: parseInt(data.get('samples_per_segment'), 10),
-    skeleton_resolution: parseFloat(data.get('skeleton_resolution')),
-    pyramid_size: parseFloat(data.get('pyramid_size')),
-    pyramid_spacing: parseFloat(data.get('pyramid_spacing')),
-    safety_margin: parseFloat(data.get('safety_margin')),
-    include_rotation: data.get('include_rotation') === 'on',
-    base_thickness: parseFloat(data.get('base_thickness')),
-    outline_offset: parseFloat(data.get('outline_offset')),
-    outline_height: parseFloat(data.get('outline_height')),
-    pyramid_height: parseFloat(data.get('pyramid_height')),
-    pyramid_style: parseInt(data.get('pyramid_style'), 10),
-    generate_stl: data.get('generate_stl') === 'on',
-  };
+  const settings = { void_mode: data.get('void_mode') };
+  for (const name of NUMBER_FIELDS) {
+    const text = data.get(name);
+    const value = Number(text);
+    if (text === null || text.trim() === '' || !Number.isFinite(value)) {
+      throw new Error(`"${name.replaceAll('_', ' ')}" needs a number`);
+    }
+    settings[name] = WHOLE_NUMBER_FIELDS.has(name) ? Math.trunc(value) : value;
+  }
+  for (const name of CHECKBOX_FIELDS) {
+    settings[name] = data.get(name) === 'on';
+  }
+  return settings;
+}
+
+// A fatal Pyodide error, a WebAssembly trap or running out of memory all leave
+// the Python runtime unusable. An ordinary Python exception does not.
+function runtimeIsDead(error) {
+  return Boolean(error.pyodide_fatal_error)
+    || error instanceof WebAssembly.RuntimeError
+    || error instanceof RangeError;
+}
+
+// Pyodide wraps Python exceptions in a full traceback. The last line is the
+// message the pipeline wrote for the user.
+function describeError(error) {
+  const message = String(error.message || error).trim();
+  return error.type ? message.split('\n').pop() : message;
 }
 
 function refreshFileList() {
@@ -98,7 +136,7 @@ function download(data, filename, mime) {
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
-function addResult(file, scad, svg, stl, preview) {
+function addResult(file, scad, stl, preview, stlFailed) {
   const stem = file.name.replace(/\.svg$/i, '');
   const card = document.createElement('article');
   card.className = 'result';
@@ -110,7 +148,8 @@ function addResult(file, scad, svg, stl, preview) {
   name.textContent = file.name;
   const meta = document.createElement('span');
   meta.className = 'result-meta';
-  meta.textContent = `${preview.positions.length} pyramids`;
+  meta.textContent = `${preview.width.toFixed(1)} × ${preview.height.toFixed(1)} mm, `
+    + `${preview.positions.length} pyramids${stlFailed ? ', STL failed (see console)' : ''}`;
   header.append(name, meta);
   card.appendChild(header);
 
@@ -138,13 +177,6 @@ function addResult(file, scad, svg, stl, preview) {
     download(scad, `${stem}.scad`, 'application/x-openscad')
   );
   footer.appendChild(scadBtn);
-
-  const svgBtn = document.createElement('button');
-  svgBtn.textContent = file.name;
-  svgBtn.addEventListener('click', () =>
-    download(svg, file.name, 'image/svg+xml')
-  );
-  footer.appendChild(svgBtn);
 
   if (stl) {
     const stlBtn = document.createElement('button');
@@ -174,128 +206,71 @@ async function initPyodide() {
   pyodide = await window.loadPyodide({
     indexURL: `https://cdn.jsdelivr.net/pyodide/${PYODIDE_VERSION}/full/`,
   });
-  log('Loading scientific Python packages (numpy, scipy, scikit-image, shapely)…');
-  await pyodide.loadPackage(['numpy', 'scipy', 'scikit-image', 'shapely', 'micropip']);
-  log('Installing svg.path from PyPI…');
+  log('Loading scientific Python packages (numpy, scipy, scikit-image, shapely, pyclipper)…');
+  await pyodide.loadPackage(['numpy', 'scipy', 'scikit-image', 'shapely', 'pyclipper', 'micropip']);
+  log('Installing svg.path and defusedxml from PyPI…');
   const micropip = pyodide.pyimport('micropip');
-  await micropip.install('svg.path');
-  log('Loading calculator module…');
-  const resp = await fetch('/pyramid_position_calculator.py');
-  if (!resp.ok) throw new Error(`Failed to fetch calculator: ${resp.status}`);
-  const src = await resp.text();
-  pyodide.FS.writeFile('/pyramid_position_calculator.py', src);
+  await micropip.install(['svg.path', 'defusedxml']);
+  log('Loading stomppad package…');
+  await loadGeometryPackage();
   pyodide.runPython(`
 import sys
 if '/' not in sys.path:
     sys.path.insert(0, '/')
-import pyramid_position_calculator
+from stomppad.openscad import generate_openscad
+from stomppad.pad import PadSettings, build_pad
 `);
   log('Pyodide ready.');
 }
 
-async function processOne(file, params) {
+// no-cache makes the browser revalidate, so a deploy can't leave it running
+// a mix of old and new modules.
+async function fetchOk(url) {
+  const response = await fetch(url, { cache: 'no-cache' });
+  if (!response.ok) throw new Error(`Failed to fetch ${url}: ${response.status}`);
+  return response;
+}
+
+async function loadGeometryPackage() {
+  const moduleNames = await (await fetchOk(`${PACKAGE_URL}/manifest.json`)).json();
+  pyodide.FS.mkdirTree('/stomppad');
+  await Promise.all(moduleNames.map(async (name) => {
+    const source = await (await fetchOk(`${PACKAGE_URL}/${name}`)).text();
+    pyodide.FS.writeFile(`/stomppad/${name}`, source);
+  }));
+}
+
+async function processOne(file, settings) {
   log(`\n=== Processing ${file.name} ===`);
   const svgText = await file.text();
   pyodide.FS.writeFile('/input.svg', svgText);
   pyodide.globals.set('js_log', (msg) => log(`[${file.name}] ${msg}`));
   // toPy returns a PyProxy we own — hold the reference so we can destroy it
   // explicitly after the run instead of relying on Pyodide's GC.
-  const paramsProxy = pyodide.toPy(params);
-  pyodide.globals.set('js_params', paramsProxy);
-  pyodide.globals.set('js_filename', file.name);
+  const settingsProxy = pyodide.toPy(settings);
+  pyodide.globals.set('js_settings', settingsProxy);
 
-  // Each runPythonAsync block returns control to the JS event loop on resolve,
-  // so console lines from py_logger flush and the browser can repaint between
-  // pipeline steps. Within a single step we still block (real fix is a Web
-  // Worker; this is the bandage).
+  // One call blocks the page until the design is built (the real fix is a
+  // Web Worker). Awaiting it at least lets the console repaint between files.
+  await Promise.race([runtimeCrash, pyodide.runPythonAsync(`
+design = build_pad('/input.svg', PadSettings.from_params(js_settings), logger=js_log)
+scad_source = generate_openscad(design)
+preview_data = design.preview()
+`).finally(() => settingsProxy.destroy())]);
 
-  await pyodide.runPythonAsync(`
-from pyramid_position_calculator import (
-    parse_svg_to_polygon,
-    calculate_skeleton,
-    calculate_valid_pyramid_positions,
-    generate_openscad_with_positions,
-)
-
-def py_logger(msg):
-    js_log(msg)
-
-p = js_params
-polygon, svg_info = parse_svg_to_polygon(
-    '/input.svg',
-    target_width=p['target_width'],
-    target_height=p['target_height'] if p['target_height'] > 0 else None,
-    samples_per_segment=p['samples_per_segment'],
-    logger=py_logger,
-)
-`);
-
-  await pyodide.runPythonAsync(`
-skeleton_points = calculate_skeleton(polygon, resolution=p['skeleton_resolution'])
-`);
-
-  await pyodide.runPythonAsync(`
-valid_positions = calculate_valid_pyramid_positions(
-    polygon,
-    pyramid_size=p['pyramid_size'],
-    pyramid_spacing=p['pyramid_spacing'],
-    target_width=p['target_width'],
-    include_rotation=p['include_rotation'],
-    safety_margin=p['safety_margin'],
-    skeleton_points=skeleton_points,
-    logger=py_logger,
-)
-`);
-
-  await pyodide.runPythonAsync(`
-generate_openscad_with_positions(
-    js_filename,
-    valid_positions,
-    '/output.scad',
-    svg_info=svg_info,
-    logger=py_logger,
-    target_width=p['target_width'],
-    base_thickness=p['base_thickness'],
-    outline_offset=p['outline_offset'],
-    outline_height=p['outline_height'],
-    pyramid_size=p['pyramid_size'],
-    pyramid_height=p['pyramid_height'],
-    pyramid_style=p['pyramid_style'],
-)
-
-def _polygon_rings(p):
-    if p.geom_type == 'Polygon':
-        return [list(p.exterior.coords)]
-    if p.geom_type == 'MultiPolygon':
-        return [list(g.exterior.coords) for g in p.geoms]
-    return []
-
-preview_data = {
-    'rings': [
-        [[float(x), float(y)] for x, y in ring]
-        for ring in _polygon_rings(polygon)
-    ],
-    'skeleton': [[float(x), float(y)] for x, y in skeleton_points],
-    'positions': [
-        [float(pos[0]), float(pos[1]), float(pos[2]) if len(pos) > 2 else 0.0]
-        for pos in valid_positions
-    ],
-}
-`);
-
-  const scad = pyodide.FS.readFile('/output.scad', { encoding: 'utf8' });
+  const scad = pyodide.globals.get('scad_source');
   const previewProxy = pyodide.globals.get('preview_data');
-  const preview = previewProxy.toJs({ dict_converter: Object.fromEntries });
-  previewProxy.destroy();
-  paramsProxy.destroy();
-  preview.pyramidSize = params.pyramid_size;
-  return { scad, svg: svgText, preview };
+  try {
+    return { scad, preview: previewProxy.toJs({ dict_converter: Object.fromEntries }) };
+  } finally {
+    previewProxy.destroy();
+  }
 }
 
-async function renderStlForFile(file, scad, svgText) {
+async function renderStlForFile(file, scad) {
   log(`[${file.name}] Rendering STL via openscad-wasm (first run loads ~8 MB WASM)…`);
   const t0 = performance.now();
-  const stl = await renderStl(scad, file.name, svgText);
+  const stl = await renderStl(scad);
   const ms = (performance.now() - t0).toFixed(0);
   log(`[${file.name}] STL rendered (${(stl.length / 1024).toFixed(1)} KB in ${ms} ms)`);
   return stl;
@@ -333,32 +308,50 @@ processBtn.addEventListener('click', async () => {
   processBtn.textContent = 'Processing…';
   stopBtn.disabled = false;
   for (const f of pendingFiles) setFileStatus(f.name, 'pending');
-  const params = readParams();
-  for (const file of pendingFiles) {
+  const generateStl = new FormData(paramsForm).get('generate_stl') === 'on';
+  let settings = null;
+  try {
+    settings = readSettings();
+  } catch (e) {
+    log(`ERROR: ${e.message}`);
+  }
+  for (const file of settings ? pendingFiles : []) {
     if (stopRequested) {
       log('Stopped.');
       break;
     }
     setFileStatus(file.name, 'working');
+    let design;
     try {
-      const { scad, svg, preview } = await processOne(file, params);
-      let stl = null;
-      if (params.generate_stl) {
-        try {
-          stl = await renderStlForFile(file, scad, svg);
-        } catch (e) {
-          log(`ERROR rendering STL for ${file.name}: ${e.message || e}`);
-        }
-      }
-      addResult(file, scad, svg, stl, preview);
-      setFileStatus(file.name, 'done');
+      design = await processOne(file, settings);
     } catch (e) {
-      log(`ERROR processing ${file.name}: ${e.message || e}`);
       setFileStatus(file.name, 'error');
+      if (runtimeIsDead(e)) {
+        // Nothing more can run until the page is reloaded.
+        pyodide = null;
+        log(`ERROR: the geometry engine crashed on ${file.name} and took the Python runtime `
+          + 'with it. Reload the page to process other files.');
+        break;
+      }
+      log(`ERROR processing ${file.name}: ${describeError(e)}`);
+      continue;
     }
+
+    let stl = null;
+    let stlFailed = false;
+    if (generateStl) {
+      try {
+        stl = await renderStlForFile(file, design.scad);
+      } catch (e) {
+        stlFailed = true;
+        log(`ERROR rendering STL for ${file.name}: ${e.message || e}`);
+      }
+    }
+    addResult(file, design.scad, stl, design.preview, stlFailed);
+    setFileStatus(file.name, 'done');
   }
-  processBtn.disabled = false;
-  processBtn.textContent = 'Process all';
+  processBtn.disabled = pyodide === null;
+  processBtn.textContent = pyodide === null ? 'Reload to continue' : 'Process all';
   stopBtn.disabled = true;
   log('\nDone.');
 });

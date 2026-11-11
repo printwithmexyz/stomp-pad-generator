@@ -35,11 +35,11 @@ Linux binary in one matrix job.
 | Field | Purpose |
 |---|---|
 | Input Folder | Source directory; every `*.svg` inside is processed |
-| Output Folder | `.scad` + `.svg` (copied) + `.stl` (if rendered) land here |
-| Cache Folder | Skeleton + position cache (per-file subfolder), default `.cache` |
+| Output Folder | `.scad` + `.stl` (if rendered) land here |
+| Cache Folder | Finished-design cache (per-file subfolder), default `.cache` |
 | OpenSCAD Executable | Path to `openscad`; only consulted when "Generate STL" is on |
 | Generate STL files | Run OpenSCAD headless after `.scad` generation |
-| Use cache | Skip skeleton + position recomputation when a valid cache exists |
+| Use cache | Reuse a file's cached design when neither the SVG nor any setting changed |
 | Preview debug visualization | Render a matplotlib PNG and pause for approval per file |
 | Parallel Threads | Worker process count for SVG + thread count for STL render |
 
@@ -56,9 +56,9 @@ worker processes are still chewing on `file_5.svg` and `file_6.svg`. With
 in-process loop (the preview dialog can't cross process boundaries).
 
 Worker processes write to a `multiprocessing.Manager` queue prefixed with
-`[filename]`; a pump thread drains it into the Console tab so you see all
-calculator output (parsed point counts, scale factor, skeleton size, valid
-positions) as it happens.
+`[filename]`; a pump thread drains it into the Console tab so you see each
+file's summary (regions, colors, final size, pyramid count) and its notes as
+they happen.
 
 ## Parameters tab
 
@@ -71,6 +71,15 @@ positions) as it happens.
   Higher = more accurate curves, slower parsing.
 - **Skeleton Resolution** — pixel size of the rasterization used for the
   medial-axis transform. Lower = denser skeleton, slower.
+- **Keep a full-canvas background rectangle** — off by default. A plain
+  rectangle that blankets the canvas underneath other artwork is treated as
+  a background and dropped, and anything in its color becomes a cutout. Tick
+  this when that rectangle is really the pad's shape.
+
+The SVG is read the way a browser paints it: transforms, CSS classes, fill
+rules, strokes and opacity are honored, and later shapes cover earlier ones.
+Slivers and specks too small to print are removed. The Console lists what
+was dropped or trimmed.
 
 ### Pyramid packing
 
@@ -89,60 +98,60 @@ positions) as it happens.
 - **Pyramid Style ($fn)** — sides of each pyramid; 4 = square pyramid,
   3 = triangular pyramid, 8 = octagonal cone-like.
 
+### Holes in artwork
+
+A hole is any area fully enclosed by the artwork: the inside of a ring, the
+counter of a letter.
+
+- **Cut through the pad** — the hole goes all the way through, with the rim
+  running around its edge. Anything inside the hole prints as a separate
+  loose piece. A hole narrower than twice the Outline Offset fills in with
+  rim, and the Console says so.
+- **Recess, keeping a floor** — the hole keeps a floor **Recess Depth** mm
+  below the surface the pyramids stand on, so everything stays one piece. A
+  depth of the Base Thickness or more cuts through instead.
+
+Both values are also written at the top of the `.scad` as `recess_voids`
+and `recess_depth`, so you can flip them in OpenSCAD without regenerating.
+
 ## Console tab
 
-Streams everything from the worker processes (and from the calculator's own
-`logger=` callback) with timestamps. Useful for spotting:
+Streams everything from the worker processes with timestamps. Useful for
+spotting:
 
-- SVGs that produced an unexpectedly small / large skeleton.
+- `NOTE:` lines: dropped backgrounds, trimmed detail, regions too narrow for
+  pyramids, holes the rim fills in, and how many separate pieces the pad
+  prints as.
 - Cache hits vs reprocessing.
 - OpenSCAD stderr when STL render fails.
 
 ## Cache system
 
-### How it works
+For `mydesign.svg` the first run builds the design and saves it as
+`.cache/mydesign/design.json`. A later run with `Use cache` on reuses it only
+if the SVG file and every setting are unchanged; the cache is keyed on both,
+so it never goes stale and there is nothing to clear by hand. Change any
+parameter and the file is simply rebuilt.
 
-For `mydesign.svg` the first run:
-
-1. Parse SVG → polygon, run skeleton + valid positions.
-2. Save `cache_data.json` and a copy of the SVG into `.cache/mydesign/`.
-
-Subsequent runs skip steps 1-2 if `Use cache` is on, and immediately generate
-a new `.scad` with whatever OpenSCAD output parameters you currently have.
-
-### When to clear cache (delete `.cache/`)
-
-Cache is invalid if you change anything that affects the geometry pipeline
-*before* `.scad` generation:
-
-- Target Width / Height
-- Samples Per Segment
-- Skeleton Resolution
-- Pyramid Size / Spacing / Safety Margin
-- Include Rotation
-- The original SVG itself
-
-OpenSCAD output parameters (thicknesses, heights, `$fn`) are applied at
-`.scad` generation time and **don't** require clearing cache.
+`cache_data.json` files from older versions are ignored and safe to delete.
 
 ## Output structure
 
 ```
 output/
 ├── design1.scad
-├── design1.svg     (copy — OpenSCAD imports it relatively)
-├── design1.stl     (if STL rendering was on)
+├── design1.stl          (if STL rendering was on)
+├── design1_debug.png    (if Preview debug was on)
 └── ...
 
 .cache/
 ├── design1/
-│   ├── design1.svg
-│   └── cache_data.json
+│   └── design.json
 └── ...
 ```
 
-The generated `.scad` contains `svg_file = "design1.svg"; import(svg_file)`,
-which is why we copy the SVG next to it.
+The `.scad` carries the artwork as inline polygons, so it stands alone. It no
+longer imports the SVG and the SVG is no longer copied next to it.
 
 ## Troubleshooting
 
@@ -161,21 +170,27 @@ they're warm, throughput is steady.
 The preview dialog needs the GUI's `self`, which can't be pickled across
 processes.
 
-**`MultiPolygon` errors** — fixed in `c09af24`; updates needed if you're on
-an older checkout.
+**"No filled shapes found" / "Text is ignored"** — the SVG has live text or
+only an embedded image. Convert text to outlines, or trace the image to
+vector shapes, then export again.
 
-## Running the calculator standalone
+**The pad came out as a plain rectangle, or the logo is missing** — check the
+Console for a background note and try the "Keep a full-canvas background
+rectangle" box either way.
 
-`pyramid_position_calculator.py` is a usable script on its own — edit the
-constants at the bottom of `main()` and run:
+## Running the pipeline without the GUI
 
-```sh
-python pyramid_position_calculator.py
+```python
+from stomppad.batch import process_svg
+from stomppad.pad import PadSettings
+
+settings = PadSettings(target_width=152, void_mode='recess', recess_depth=0.6)
+process_svg('logo.svg', 'output', settings)   # writes output/logo.scad
 ```
 
-Outputs `stomp_pad_precalculated.scad` and a `debug_viz.png` showing the
-boundary, skeleton, and pyramid placements. Useful for quick experiments
-without the GUI in the way.
+`stomppad.batch.save_debug_visualization(design, 'debug.png')` draws the
+artwork, holes, centerline and pyramid bases for a design from
+`stomppad.pad.build_pad`.
 
 ## See also
 
