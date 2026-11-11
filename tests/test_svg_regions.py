@@ -26,6 +26,8 @@ from stomppad.overlay import (
     robust_intersection,
     robust_simplify,
     robust_union,
+    snapped,
+    without_specks,
 )
 from stomppad.svg_parse import UnsafeXmlError, parse_transform
 
@@ -153,6 +155,29 @@ print('survived')
     result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == 'survived'
+
+
+def test_without_specks_joins_pieces_and_clears_debris():
+    pinhole = box(5, 5, 5.004, 5.004)
+    left, right = box(0, 0, 10, 10).difference(pinhole), box(10.003, 0, 20, 10)
+    spike, speck = box(20, 4, 23, 4.004), box(30, 30, 30.004, 30.004)
+    result = without_specks(shapely.GeometryCollection([left, right, spike, speck]), 0.01)
+    assert result.geom_type == 'Polygon'
+    assert len(result.interiors) == 0
+    assert result.symmetric_difference(box(0, 0, 20, 10)).area < SNAP_NOISE
+
+    kept = box(0, 0, 10, 10).difference(box(4, 4, 4.5, 4.5))
+    assert without_specks(kept, 0.01).symmetric_difference(kept).area < SNAP_NOISE
+
+
+def test_snapping_puts_every_corner_on_the_grid_and_drops_what_collapses():
+    wobbly = Polygon(
+        [(0.00004, 0), (10, 0.00003), (10.00002, 10), (0, 9.99996)],
+        [[(5, 5), (5.00003, 5), (5, 5.00003)]],
+    )
+    result = snapped(wobbly, 1e-4)
+    assert result.equals(box(0, 0, 10, 10))
+    assert snapped(Polygon([(0, 0), (math.nan, 1), (1, 1)]), 1e-4).is_empty
 
 
 @pytest.mark.parametrize('tolerance', [0.05, 0.3])
@@ -745,6 +770,46 @@ def test_cleanup_keeps_printable_holes():
     assert notes == []
 
 
+def test_hairline_between_two_colors_goes_to_a_neighbour():
+    regions = [
+        Region(0, '#ff0000', box(0, 0, 20, 20)),
+        Region(1, '#000000', box(20, 0, 20.3, 20)),
+        Region(2, '#0000ff', box(20.3, 0, 40, 20)),
+    ]
+    cleaned, notes = clean_regions(regions)
+    assert sorted(region.fill for region in cleaned) == ['#0000ff', '#ff0000']
+    covered = robust_union([region.geometry for region in cleaned])
+    assert covered.symmetric_difference(box(0, 0, 40, 20)).area < SNAP_NOISE
+    assert cleaned[0].geometry.intersection(cleaned[1].geometry).area < SNAP_NOISE
+    assert any('#000000' in note for note in notes)
+
+
+def test_speck_inside_a_color_is_absorbed_instead_of_leaving_a_hole():
+    speck = box(10, 10, 10.6, 10.6)
+    regions = [Region(0, '#ff0000', box(0, 0, 20, 20).difference(speck)), Region(1, '#ffffff', speck)]
+    cleaned, _ = clean_regions(regions)
+    assert [region.fill for region in cleaned] == ['#ff0000']
+    assert len(cleaned[0].geometry.interiors) == 0
+    assert cleaned[0].geometry.area == pytest.approx(400, abs=0.01)
+
+
+def test_sliver_on_the_outer_edge_is_not_absorbed():
+    regions = [Region(0, '#ff0000', box(0, 0, 20, 20)), Region(1, '#0000ff', box(20, 0, 20.2, 20))]
+    cleaned, _ = clean_regions(regions)
+    assert [region.fill for region in cleaned] == ['#ff0000']
+    assert cleaned[0].geometry.bounds == pytest.approx((0, 0, 20, 20), abs=0.01)
+
+
+def test_colors_that_shared_a_curved_edge_still_meet_after_smoothing():
+    disc = Point(0, 0).buffer(10, 64)
+    regions = [Region(0, '#ff0000', disc), Region(1, '#0000ff', box(-20, -20, 20, 20).difference(disc))]
+    cleaned, _ = clean_regions(regions, CleanupSettings(simplify_tolerance=0.3))
+    red, blue = (region.geometry for region in cleaned)
+    assert robust_union([red, blue]).area == pytest.approx(1600, abs=0.01)
+    assert red.intersection(blue).area < SNAP_NOISE
+    assert len(blue.interiors) == 1
+
+
 def test_cleanup_settings_are_tunable():
     thin_bar = [Region(0, '#000000', box(0, 0, 20, 0.6))]
     assert len(clean_regions(thin_bar)[0]) == 1
@@ -804,3 +869,12 @@ def test_more_colors_than_filaments():
     fills = ['#ff0000', '#00ff00', '#0000ff', '#ffff00', '#ff00ff']
     regions = [Region(i, fill, box(i * 50, 0, i * 50 + 40, 40)) for i, fill in enumerate(fills)]
     assert [w.code for w in printability_warnings(regions, pyramid_size=4)] == ['too_many_colors']
+
+
+def test_a_base_color_of_its_own_takes_a_filament():
+    fills = ['#ff0000', '#00ff00', '#0000ff', '#ffff00']
+    regions = [Region(i, fill, box(i * 50, 0, i * 50 + 40, 40)) for i, fill in enumerate(fills)]
+    assert printability_warnings(regions, pyramid_size=4, base_color='#ff0000') == []
+    warnings = printability_warnings(regions, pyramid_size=4, base_color='#000000')
+    assert [w.code for w in warnings] == ['too_many_colors']
+    assert warnings[0].message.startswith('5 colors')

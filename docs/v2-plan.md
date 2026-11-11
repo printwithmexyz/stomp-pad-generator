@@ -38,7 +38,19 @@ Phases, each a review gate:
   has the same controls, and the 2D preview draws holes. Checked end to end
   in Chrome. `pyramid_position_calculator.py` is deleted. STL rendering in the
   browser has not been exercised since the change.
-- **C. Multicolor export.** One body per color plus the base, STL set, 3MF.
+- **C1. Multicolor core (done, not wired in).** `PadDesign.bodies` splits
+  the pad into a base and one body per other color. The `.scad` renders the
+  whole pad or one body (`-D part=N`). `stomppad/threemf.py` packs the body
+  STLs into a 3MF with Bambu filament assignments, and `stomppad.batch` has
+  `render_bodies` and `export_3mf`. New settings: `color_depth` (default
+  0.6 mm) and `base_color` (default: the color covering the most area).
+  Cleanup now hands removed detail that other colors surround to a
+  neighbour. Tests in `tests/test_threemf.py` and the bodies section of
+  `tests/test_pad_build.py`.
+- **C2. Multicolor in the apps.** Desktop: a multicolor switch, color depth,
+  base color, and STL-set / 3MF output. Web: the same, rendering each body in
+  openscad-wasm and building the 3MF in Pyodide. The web renderer also needs
+  to fail on OpenSCAD `ERROR:` lines the way `batch.render_stl` now does.
 - **D. Region list UI.** Show regions, warnings, and drop / recolor controls
   in web and desktop.
 
@@ -51,7 +63,29 @@ Fixed on the way through B1, both present in the old
 - The skeleton step breaks ties at random, so the same SVG could give a
   different pyramid count from run to run. It is now seeded.
 
+Decided in C1:
+
+- **Base color.** The base takes the largest color by default, so the number
+  of filaments equals the number of colors. `base_color` overrides it, and a
+  color no region uses adds a filament.
+- **Removed slivers.** A neighbour absorbs them (this was the open question
+  below). A piece counts as surrounded when kept colors border at least 80%
+  of its outline; pieces on the outer edge stay removed. Without this a
+  dropped speck inside another color became a hole through the pad.
+- **3MF colors.** Parts are named after their colors and carry Bambu filament
+  slots. Standard 3MF colors are optional (`standard_colors=True`) and off by
+  default: recent Bambu Studio versions open a color-matching dialog for
+  them and discard the slots.
+
 Known gaps:
+
+- **The 3MF has not been opened in Bambu Studio.** Its layout follows the
+  importer's source, and lib3mf (strict mode) and trimesh read it back as
+  closed, correctly oriented meshes. Bambu Studio binaries could not be
+  downloaded into the test environment.
+- Body renders were checked on 33 real icons (110 renders, both hole modes)
+  with the OpenSCAD WebAssembly build: no shape dropped, and the bodies add
+  up to the whole pad within 0.004%. Native OpenSCAD has not been run.
 
 - **GEOS errors kill Pyodide (handled).** In Pyodide (checked on 0.26.4 and
   0.29.0) a C++ exception from GEOS is not turned into a Python exception. It
@@ -82,9 +116,6 @@ Known gaps:
 - Ignored without a warning: CSS `transform` in a `style` attribute, nested
   `<svg>` viewports, `stroke-dasharray`, and the `color` property behind
   `currentColor`.
-- Cleanup removes a sliver but leaves its footprint empty, so a 0.3 mm stripe
-  between two colors becomes a 0.3 mm groove. Decide in Phase C whether the
-  neighbour should absorb it.
 - A full-canvas plain rectangle under other art is always read as background.
   If it is really the pad's base shape, pass `keep_background`.
 

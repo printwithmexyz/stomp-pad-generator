@@ -4,7 +4,17 @@ import stat
 
 import pytest
 
-from stomppad.batch import load_or_build_design, process_svg, render_stl, save_debug_visualization
+import zipfile
+
+from stomppad.batch import (
+    body_stl_path,
+    export_3mf,
+    load_or_build_design,
+    process_svg,
+    render_bodies,
+    render_stl,
+    save_debug_visualization,
+)
 from stomppad.openscad import generate_openscad
 from stomppad.pad import PadSettings
 
@@ -138,6 +148,81 @@ def test_render_stl_fails_when_openscad_writes_nothing(workspace):
     log = []
     assert not render_stl(workspace / 'pad.scad', workspace / 'pad.stl', openscad, log.append)
     assert any('wrote no STL' in line for line in log)
+
+
+@needs_shell_scripts
+def test_render_stl_can_ask_for_one_body(workspace):
+    openscad = fake_openscad(workspace / 'openscad', 'echo "$@" > "$2"\n')
+    assert render_stl(workspace / 'pad.scad', workspace / 'pad.stl', openscad, lambda line: None, part=2)
+    assert (workspace / 'pad.stl').read_text().split() == [
+        '-o', str(workspace / 'pad.stl'), '-D', 'part=2', str(workspace / 'pad.scad'),
+    ]
+
+
+@needs_shell_scripts
+def test_render_stl_fails_when_openscad_leaves_a_shape_out(workspace):
+    openscad = fake_openscad(
+        workspace / 'openscad',
+        'echo solid > "$2"\necho "ERROR: The given mesh is not closed! Unable to convert." >&2\n',
+    )
+    log = []
+    assert not render_stl(workspace / 'pad.scad', workspace / 'pad.stl', openscad, log.append)
+    assert log == ['  OpenSCAD left part of the model out: ERROR: The given mesh is not closed! Unable to convert.']
+
+
+TWO_TONE = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50">'
+            '<rect width="60" height="50" fill="red"/><rect x="60" width="40" height="50" fill="blue"/></svg>')
+TETRAHEDRON_STL = 'solid t\n' + ''.join(
+    'facet normal 0 0 0\nouter loop\n' + ''.join(f'vertex {corner}\n' for corner in facet) + 'endloop\nendfacet\n'
+    for facet in (('0 0 0', '0 1 0', '1 0 0'), ('0 0 0', '1 0 0', '0 0 1'),
+                  ('0 0 0', '0 0 1', '0 1 0'), ('1 0 0', '0 1 0', '0 0 1'))
+) + 'endsolid t\n'
+
+
+@pytest.fixture
+def two_tone(workspace):
+    (workspace / 'logo.svg').write_text(TWO_TONE)
+    settings = PadSettings(target_width=60, multicolor=True)
+    design = load_or_build_design(workspace / 'logo.svg', settings, None, lambda line: None)
+    return design, workspace / 'out' / 'logo.scad'
+
+
+@needs_shell_scripts
+def test_bodies_render_to_one_stl_each_and_pack_into_a_3mf(workspace, two_tone):
+    design, scad_path = two_tone
+    openscad = fake_openscad(workspace / 'openscad', f"cat > \"$2\" <<'EOF'\n{TETRAHEDRON_STL}EOF\n")
+    log = []
+    stl_paths = render_bodies(design, scad_path, openscad, log.append)
+    assert {number: path.name for number, path in stl_paths.items()} == {
+        1: 'logo_1_base_ff0000.stl', 2: 'logo_2_color_0000ff.stl',
+    }
+    assert all(path.exists() for path in stl_paths.values())
+
+    path = export_3mf(design, stl_paths, workspace / 'out' / 'logo.3mf', log.append)
+    assert log[-1] == '  3MF file: logo.3mf'
+    with zipfile.ZipFile(path) as archive:
+        settings = archive.read('Metadata/model_settings.config').decode()
+    assert settings.count('<part ') == 2
+    assert 'value="2 #0000ff"' in settings
+
+
+@needs_shell_scripts
+def test_body_rendering_stops_at_the_first_failure(workspace, two_tone):
+    design, scad_path = two_tone
+    openscad = fake_openscad(workspace / 'openscad', 'echo "$4" >> "$(dirname "$2")/calls"\nexit 1\n')
+    assert render_bodies(design, scad_path, openscad, lambda line: None) is None
+    assert (workspace / 'out' / 'calls').read_text().split() == ['part=1']
+    assert not body_stl_path(scad_path, design.bodies[0]).exists()
+
+
+def test_cached_design_keeps_its_bodies(workspace):
+    (workspace / 'logo.svg').write_text(TWO_TONE)
+    settings = PadSettings(target_width=60, multicolor=True, base_color='#000000')
+    cache = workspace / 'cache'
+    built = load_or_build_design(workspace / 'logo.svg', settings, cache, lambda line: None)
+    cached = load_or_build_design(workspace / 'logo.svg', settings, cache, lambda line: None)
+    assert [body.label for body in cached.bodies] == ['1 base #000000', '2 #ff0000', '3 #0000ff']
+    assert generate_openscad(cached) == generate_openscad(built)
 
 
 def test_debug_visualization_is_written(workspace):

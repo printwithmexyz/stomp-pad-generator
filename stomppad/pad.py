@@ -1,6 +1,7 @@
 """SVG in, pad design out: the one pipeline the desktop and web apps both call."""
 
 from dataclasses import dataclass, field, fields, replace
+from functools import cached_property
 
 import numpy as np
 import shapely
@@ -8,12 +9,34 @@ from shapely import affinity
 from shapely.geometry import Polygon
 
 from .packing import PackingSettings, pack_regions, require_in_range
-from .refine import CleanupSettings, clean_regions, printability_warnings, scale_regions_to_mm
-from .overlay import polygon_parts, robust_buffer, robust_difference, robust_union
-from .svg_parse import parse_svg, regions_from_fills
+from .refine import (
+    SMALLEST_DETAIL,
+    CleanupSettings,
+    clean_regions,
+    printability_warnings,
+    scale_regions_to_mm,
+)
+from .overlay import (
+    polygon_parts,
+    robust_buffer,
+    robust_difference,
+    robust_simplify,
+    robust_union,
+    snapped,
+    without_specks,
+)
+from .svg_parse import normalize_color, parse_svg, regions_from_fills
 
 VOID_MODES = ('through', 'recess')
 MAX_PAD_SIZE = 2000  # mm
+
+# OpenSCAD works at about 0.000015 mm. A hole or sliver near that size
+# collapses there, the extruded mesh comes out open, and OpenSCAD drops the
+# shape from the render with nothing but "mesh is not closed" in its log.
+# Set operations leave such specks along every seam, so shapes that go into
+# the .scad lose anything narrower than SMALLEST_DETAIL and then sit on the
+# OUTPUT_STEP grid, which is the precision the .scad is written at.
+OUTPUT_STEP = 1e-4  # mm
 
 PAD_LIMITS = {
     'target_width': (1, MAX_PAD_SIZE),
@@ -23,6 +46,7 @@ PAD_LIMITS = {
     'outline_height': (0, 100),
     'pyramid_height': (0.1, 100),
     'recess_depth': (0, 100),
+    'color_depth': (0.05, 100),
 }
 
 
@@ -45,6 +69,13 @@ class PadSettings:
     void_mode: str = 'through'
     recess_depth: float = 0.6
 
+    # Every color other than the base owns the top color_depth of the floor
+    # under its regions, plus their pyramids. The base is everything else:
+    # the rest of the floor and the rim. base_color=None gives the base the
+    # color that covers the most area, so it costs no extra filament.
+    color_depth: float = 0.6
+    base_color: str = None
+
     packing: PackingSettings = PackingSettings()
     cleanup: CleanupSettings = CleanupSettings()
 
@@ -54,6 +85,11 @@ class PadSettings:
         require_in_range(self, PAD_LIMITS)
         if self.target_height is not None:
             require_in_range(self, {'target_height': (1, MAX_PAD_SIZE)})
+        if self.base_color is not None:
+            base_color = normalize_color(self.base_color)
+            if base_color is None:
+                raise ValueError('base color must be a color, not "none"')
+            object.__setattr__(self, 'base_color', base_color)
         # A fixed order, so equal settings always have the same repr (the cache key).
         fills = (self.void_fills,) if isinstance(self.void_fills, str) else self.void_fills
         object.__setattr__(self, 'void_fills', tuple(sorted(fills)))
@@ -66,8 +102,8 @@ class PadSettings:
     def from_params(cls, params):
         """
         Settings from the flat name -> value mapping both apps collect from
-        their forms. Missing names keep their defaults, and a target_height
-        of 0 means no height limit.
+        their forms. Missing names keep their defaults, a target_height of 0
+        means no height limit, and an empty base_color means the largest color.
         """
         packing_names = {f.name for f in fields(PackingSettings)}
         own_names = {f.name for f in fields(cls)} - {'packing', 'cleanup'}
@@ -75,10 +111,27 @@ class PadSettings:
         if unknown:
             raise ValueError(f'Unknown settings: {sorted(unknown)}')
         own = {name: value for name, value in params.items() if name in own_names}
-        if not own.get('target_height'):
-            own['target_height'] = None
+        for optional in ('target_height', 'base_color'):
+            if not own.get(optional):
+                own[optional] = None
         packing = PackingSettings(**{n: v for n, v in params.items() if n in packing_names})
         return cls(packing=packing, **own)
+
+
+@dataclass(frozen=True)
+class Body:
+    """One filament's share of the pad. A slicer gets each body as a separate part."""
+    number: int  # 1 is the base. Doubles as the filament slot the body prints from.
+    fill: str
+    top: object  # floor area whose top layers the body owns; empty for the base, which owns the rest
+
+    @property
+    def is_base(self):
+        return self.number == 1
+
+    @property
+    def label(self):
+        return f'{self.number} base {self.fill}' if self.is_base else f'{self.number} {self.fill}'
 
 
 @dataclass
@@ -102,8 +155,34 @@ class PadDesign:
     def voids_are_recessed(self):
         return self.settings.recesses_voids
 
+    @property
+    def color_depth(self):
+        return min(self.settings.color_depth, self.settings.base_thickness)
+
+    @cached_property
+    def bodies(self):
+        """The base first, then every other color from the largest area down."""
+        area_by_fill = {}
+        for region in self.regions:
+            area_by_fill[region.fill] = area_by_fill.get(region.fill, 0.0) + region.geometry.area
+        fills = sorted(area_by_fill, key=lambda fill: (-area_by_fill[fill], fill))
+        base_fill = self.settings.base_color or fills[0]
+        tops = [fill for fill in fills if fill != base_fill]
+        return [Body(1, base_fill, Polygon())] + [
+            Body(number, fill, _tidy(robust_union([r.geometry for r in self.regions if r.fill == fill])))
+            for number, fill in enumerate(tops, start=2)
+        ]
+
     def positions(self):
         return np.vstack([packed.positions for packed in self.packed.values()])
+
+    def positions_by_body(self):
+        """{body number: (N, 3) array of x, y, rotation} for the pyramids each body carries."""
+        number_by_fill = {body.fill: body.number for body in self.bodies}
+        grouped = {body.number: [np.empty((0, 3))] for body in self.bodies}
+        for region in self.regions:
+            grouped[number_by_fill[region.fill]].append(self.packed[region.id].positions)
+        return {number: np.vstack(parts) for number, parts in grouped.items()}
 
     def preview(self):
         """The design as plain numbers and lists, for a frontend to draw."""
@@ -126,7 +205,10 @@ class PadDesign:
         colors = len({region.fill for region in self.regions})
         summary = (f'  {len(self.regions)} region(s) in {colors} color(s), '
                    f'{self.width:.1f} x {self.height:.1f} mm, {len(self.positions())} pyramids')
-        return [summary] + [f'  NOTE: {warning}' for warning in self.warnings]
+        lines = [summary]
+        if len(self.bodies) > 1:
+            lines.append('  Filaments: ' + ', '.join(body.label for body in self.bodies))
+        return lines + [f'  NOTE: {warning}' for warning in self.warnings]
 
 
 def _ring_lists(geometry):
@@ -158,6 +240,12 @@ def _close_gaps(geometry, radius):
     """Bridge gaps narrower than 2 * radius so neighbouring colors share one floor."""
     grown = robust_buffer(geometry, radius, join_style='mitre')
     return robust_buffer(grown, -radius, join_style='mitre')
+
+
+def _tidy(geometry):
+    """A shape OpenSCAD can extrude: see SMALLEST_DETAIL."""
+    cleared = without_specks(geometry, SMALLEST_DETAIL)
+    return snapped(robust_simplify(cleared, SMALLEST_DETAIL / 4), OUTPUT_STEP)
 
 
 def _enclosed_holes(art):
@@ -209,16 +297,19 @@ def build_pad(svg_file, settings=PadSettings(), logger=None):
         raise ValueError('Every shape was too small to print at this size. ' + ' '.join(warnings))
     regions = _fit_to_size(regions, settings.target_width, settings.target_height)
 
-    art = _close_gaps(robust_union([r.geometry for r in regions]), settings.cleanup.min_feature / 2)
-    voids = _enclosed_holes(art)
+    art = _tidy(_close_gaps(robust_union([r.geometry for r in regions]), settings.cleanup.min_feature / 2))
+    voids = snapped(_enclosed_holes(art), OUTPUT_STEP)
     packed = pack_regions(regions, settings.packing)
 
     warnings += [warning.message for warning in printability_warnings(
         regions, settings.packing.pyramid_size, settings.packing.safety_margin,
+        base_color=settings.base_color,
     )]
     warnings += _assembly_notes(art, voids, settings)
 
     design = PadDesign(settings, regions, art, voids, packed, warnings)
+    if len(design.bodies) > 1 and settings.color_depth >= settings.base_thickness:
+        warnings.append('Color depth is at least the base thickness, so colors run through the whole floor.')
     for line in design.describe():
         (logger or print)(line)
     return design

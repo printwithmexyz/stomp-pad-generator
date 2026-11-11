@@ -26,6 +26,11 @@ section below into the GitHub release body.
   itself.
 - `pyclipper` is a new dependency (desktop `requirements_bulk_processor.txt`;
   the web app loads it from Pyodide).
+- **Multicolor bodies and 3MF export in the `stomppad` package** (not in the
+  apps yet). A pad splits into a base plus one body per other color, each
+  owning the top `color_depth` of the floor and its pyramids. The `.scad`
+  renders any one body with `-D part=N`, and `stomppad.threemf` packs the
+  body STLs into a 3MF whose parts carry Bambu Studio filament slots.
 
 ### Changed
 
@@ -38,6 +43,10 @@ section below into the GitHub release body.
   offers it as a download.
 - **Desktop cache** is keyed on the SVG and every setting. Old
   `cache_data.json` files are ignored.
+- **Cleanup no longer leaves gaps between colors.** Detail too small to
+  print that other colors surround is absorbed by a neighbour.
+- **STL renders fail loudly** when OpenSCAD reports leaving a shape out,
+  instead of saving an STL with material missing.
 - Pyramid bases are checked in the shape the `.scad` draws them, so
   `Pyramid Style` values other than 4 fit properly.
 

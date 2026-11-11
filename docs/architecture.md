@@ -26,12 +26,51 @@ manifest, so the browser and desktop never drift.
 | `refine.py` | scale to mm, cleanup, printability warnings, drop / recolor |
 | `packing.py` | medial-axis centerline and hex-packed pyramid placement |
 | `pad.py` | `PadSettings`, `PadDesign`, `build_pad`: the pipeline end to end |
-| `openscad.py` | a design as `.scad` text with inline polygons (no SVG import) |
+| `openscad.py` | a design as `.scad` text with inline polygons (no SVG import); `part` picks the whole pad or one body |
+| `threemf.py` | body STLs → one 3MF with a part per filament |
 | `overlay.py` | every union, difference, intersection, offset, simplify and repair, done so none can raise |
-| `batch.py` | desktop only: files on disk, cache, STL render, debug picture |
+| `batch.py` | desktop only: files on disk, cache, STL and 3MF export, debug picture |
 
 Python owns all geometry. OpenSCAD only extrudes and subtracts the polygons
 it is handed, which is why coordinates can never disagree between the two.
+
+### Bodies
+
+A pad is split into one body per filament (`PadDesign.bodies`). Body 1 is the
+base: the rim and all of the floor that no other body claims. Every other
+color owns the top `color_depth` of the floor under its regions, plus the
+pyramids standing there. The base takes the color covering the most area
+unless `base_color` says otherwise, so a four-color logo needs four
+filaments, not five.
+
+The `.scad` has a `part` variable. `part = 0` is the whole pad as one solid.
+`-D part=N` renders body N alone. Color bodies are grown 0.001 mm so that
+neighbours overlap by a hair: an exact fit would leave slivers of base
+between them wherever two outlines disagree in the last decimal.
+
+`threemf.py` turns the rendered body STLs into a 3MF: one mesh object per
+body, joined by a components object, plus `Metadata/model_settings.config`,
+which is where Bambu Studio and OrcaSlicer read each part's filament slot
+(`extruder`) from. The layout follows Bambu Studio's importer
+(`src/libslic3r/Format/bbs_3mf.cpp`), read at commit `930fe93`. Standard 3MF
+colors are off by default because recent Bambu Studio versions respond to
+them by opening a color-matching dialog and discarding the filament slots.
+
+### What OpenSCAD drops without saying
+
+OpenSCAD works at about 0.000015 mm. A hole or sliver near that size
+collapses, the extruded mesh comes out open, and OpenSCAD leaves the shape
+out of the result. It logs `ERROR: The given mesh is not closed!` and still
+exits 0 with an STL. A color body can vanish this way while its pyramids
+remain. Two defences:
+
+- `pad._tidy` removes anything narrower than `SMALLEST_DETAIL` (0.01 mm) from
+  every shape bound for the `.scad` and snaps it to `OUTPUT_STEP`, the
+  precision the file is written at. Set operations leave specks that small
+  along every seam, so any new shape written into the `.scad` needs the same
+  treatment.
+- `batch.render_stl` fails the render when OpenSCAD's log has an `ERROR:`
+  line. The web renderer does not check yet.
 
 ### GEOS errors and Pyodide
 
@@ -49,6 +88,14 @@ at lower precision. So `overlay.py` never gives GEOS the chance:
   The GEOS topology-preserving simplifier walks its lines in an order that
   depends on memory addresses, so it crashed on one logo only when that logo
   was processed inside a batch.
+
+The grid overlay has one known way to throw: input with detail about as fine
+as the grid itself ("side location conflict"). Shapes that have been through
+a cleanup radius have none. Shapes stitched together from the scraps of
+other set operations do, so they go through `without_specks` (Clipper) before
+GEOS sees them again, and questions about such scraps are answered with
+point-in-polygon tests, not overlays. Five of 720 real icons threw until
+`refine._absorb_enclosed` was written that way.
 
 New geometry code must go through `overlay.py` instead of calling `.union()`,
 `.difference()`, `.intersection()`, `.buffer()`, `.simplify()` or

@@ -15,6 +15,11 @@ So nothing here gives GEOS the chance to throw:
   throw (the simplifier does so depending on memory layout, so the same file
   may pass alone and fail in a batch). Clipper, the integer library slicers
   use, does those jobs and cannot fail that way.
+
+The grid overlay has one known way to throw: input with detail about as fine
+as the grid itself ("side location conflict"). Shapes that have been through
+a cleanup radius never have any. Shapes stitched together from the scraps of
+other set operations do, so they go through without_specks first.
 """
 
 import math
@@ -27,6 +32,7 @@ from shapely.geometry.polygon import orient
 
 GRID_FRACTION = 1e-7   # snap grid, as a fraction of the geometry's extent
 ARC_FRACTION = 2e-5    # how far a rounded corner may stray from a true arc, same basis
+ARC_TOLERANCE = ARC_FRACTION / GRID_FRACTION  # the same, in grid steps
 
 CLIPPER_JOINS = {
     'round': pyclipper.JT_ROUND,
@@ -61,10 +67,9 @@ class _IntegerGrid:
     however far the shape is from the origin.
     """
 
-    def __init__(self, bounds, extent):
-        self.origin = np.array(bounds[:2])
-        self.extent = extent
-        self.scale = 1 / (extent * GRID_FRACTION)
+    def __init__(self, origin, step):
+        self.origin = np.array(origin)
+        self.scale = 1 / step
 
     @classmethod
     def around(cls, geometry, reach=0.0):
@@ -73,7 +78,7 @@ class _IntegerGrid:
         extent = max(max_x - min_x, max_y - min_y, abs(reach))
         if not (math.isfinite(extent) and extent > 0 and math.isfinite(1 / (extent * GRID_FRACTION))):
             return None
-        return cls((min_x, min_y), extent)
+        return cls((min_x, min_y), extent * GRID_FRACTION)
 
     def to_grid(self, points):
         return np.round((np.asarray(points)[:, :2] - self.origin) * self.scale).astype(np.int64)
@@ -126,6 +131,18 @@ def _repaired(geometry):
         return geometry
     grid = _IntegerGrid.around(geometry)
     return grid.even_odd_area(grid.ring_paths(geometry)) if grid else Polygon()
+
+
+def snapped(geometry, step):
+    """
+    The geometry with every coordinate moved to a multiple of step, and no
+    ring left touching or crossing itself at that resolution. A shape written
+    out at a fixed number of decimals is then exactly the shape that was built.
+    """
+    if not _is_finite(geometry):
+        return Polygon()
+    grid = _IntegerGrid((0.0, 0.0), step)
+    return grid.even_odd_area(grid.ring_paths(geometry))
 
 
 def _on_a_grid(geometries):
@@ -209,6 +226,21 @@ def robust_simplify(geometry, tolerance):
     return grid.even_odd_area([grid.to_grid(ring).tolist() for ring in rings])
 
 
+def without_specks(geometry, width):
+    """
+    Fill holes and gaps narrower than width, then shave off spikes and specks
+    narrower than width. Polygons that overlap or touch come back joined.
+
+    Set operations leave debris a grid step wide along every seam they cut.
+    A later overlay on a slightly different grid can throw on detail that
+    fine, so a shape pieced together from such scraps goes through here
+    before GEOS sees it again.
+    """
+    radius = width / 2
+    filled = robust_buffer(robust_buffer(geometry, radius, 'mitre'), -radius, 'mitre')
+    return robust_buffer(robust_buffer(filled, -radius, 'mitre'), radius, 'mitre')
+
+
 def _lines(geometry, closed):
     """(points, closed) for every line in a line geometry."""
     for line in getattr(geometry, 'geoms', [geometry]):
@@ -239,9 +271,7 @@ def robust_buffer(geometry, distance, join_style='round', cap_style='round', mit
         return Polygon()
 
     join = CLIPPER_JOINS[join_style]
-    offsetter = pyclipper.PyclipperOffset(
-        miter_limit=mitre_limit, arc_tolerance=grid.extent * ARC_FRACTION * grid.scale,
-    )
+    offsetter = pyclipper.PyclipperOffset(miter_limit=mitre_limit, arc_tolerance=ARC_TOLERANCE)
     if geometry.geom_type in ('LineString', 'LinearRing', 'MultiLineString'):
         for points, line_closed in _lines(geometry, closed):
             path = grid.to_grid(points)

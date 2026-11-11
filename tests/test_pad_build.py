@@ -13,7 +13,7 @@ from shapely.geometry import Point, Polygon, box
 from stomppad import packing
 from stomppad.openscad import generate_openscad
 from stomppad.packing import PackingSettings, calculate_skeleton, hex_grid, pyramid_footprints
-from stomppad.pad import PadSettings, build_pad
+from stomppad.pad import OUTPUT_STEP, PadSettings, build_pad
 from stomppad.overlay import polygon_parts, robust_union
 
 DONUT = ('<path fill-rule="evenodd" d="M50 5 A45 45 0 1 0 50 95 A45 45 0 1 0 50 5 Z '
@@ -47,6 +47,12 @@ def scad_value(scad, name):
 
 def scad_module(scad, name):
     return re.search(rf'module {name}\(\) \{{\n(.*?)^\}}', scad, re.DOTALL | re.MULTILINE).group(1)
+
+
+def scad_positions(scad):
+    """The pyramid rows as an (N, 4) array: x, y, rotation, body."""
+    rows = re.findall(r'^    \[([-\d.]+), ([-\d.]+), ([-\d.]+), (\d+)\],$', scad, re.MULTILINE)
+    return np.array(rows, dtype=float).reshape(-1, 4)
 
 
 def scad_module_geometry(scad, name):
@@ -344,6 +350,162 @@ def test_region_too_narrow_gets_no_pyramids_and_a_warning(svg):
     assert 'pyramid_positions = [\n];' in generate_openscad(design)
 
 
+# --- bodies -----------------------------------------------------------------
+
+# A dark field with a red disc and a pale square that has a white disc inside it.
+BADGE = ('<rect width="100" height="60" fill="#111111"/>'
+         '<circle cx="30" cy="30" r="18" fill="#e63946"/>'
+         '<rect x="60" y="15" width="28" height="30" fill="#9bd1e5"/>'
+         '<circle cx="74" cy="30" r="6" fill="#ffffff"/>')
+BADGE_SIZE = dict(viewbox='0 0 100 60')
+
+
+def test_single_color_pad_is_one_body(svg):
+    design = build(svg(TWO_TONE))
+    assert [(body.number, body.fill, body.is_base) for body in design.bodies] == [(1, '#ff0000', True)]
+    assert scad_value(generate_openscad(design), 'color_bodies') == '[]'
+    assert not any('Filaments' in line for line in design.describe())
+
+
+def test_largest_color_is_the_base_and_the_rest_follow_by_area(svg):
+    design = build(svg(BADGE, **BADGE_SIZE), multicolor=True, keep_background=True)
+    assert [(body.number, body.fill) for body in design.bodies] == [
+        (1, '#111111'), (2, '#e63946'), (3, '#9bd1e5'), (4, '#ffffff'),
+    ]
+    assert design.bodies[0].top.is_empty
+    assert design.bodies[1].top.area == pytest.approx(math.pi * 18 ** 2, rel=0.01)
+    assert '  Filaments: 1 base #111111, 2 #e63946, 3 #9bd1e5, 4 #ffffff' in design.describe()
+
+
+def test_a_base_color_no_region_uses_adds_a_body(svg):
+    design = build(svg(TWO_TONE), multicolor=True, base_color='Black')
+    assert [(body.number, body.fill) for body in design.bodies] == [
+        (1, '#000000'), (2, '#0000ff'), (3, '#ff0000'),
+    ]
+    assert len(design.positions_by_body()[1]) == 0
+
+
+def test_base_color_can_pick_a_smaller_color(svg):
+    design = build(svg(BADGE, **BADGE_SIZE), multicolor=True, keep_background=True, base_color='#ffffff')
+    assert [body.fill for body in design.bodies] == ['#ffffff', '#111111', '#e63946', '#9bd1e5']
+
+
+def test_single_color_pad_with_a_base_color_is_two_tone(svg):
+    design = build(svg(TWO_TONE), base_color='#222222')
+    assert [body.fill for body in design.bodies] == ['#222222', '#ff0000']
+
+
+@pytest.mark.parametrize('bad_color', ['none', 'not-a-color'])
+def test_base_color_must_be_a_color(bad_color):
+    with pytest.raises(ValueError):
+        PadSettings(base_color=bad_color)
+
+
+def test_every_pyramid_belongs_to_the_body_it_stands_on(svg):
+    design = build(svg(BADGE, **BADGE_SIZE), multicolor=True, keep_background=True)
+    by_body = design.positions_by_body()
+    assert sum(len(positions) for positions in by_body.values()) == len(design.positions())
+    assert all(len(positions) > 0 for positions in by_body.values())
+    packing = design.settings.packing
+    for body in design.bodies[1:]:
+        footprints = pyramid_footprints(by_body[body.number], packing.pyramid_size, packing.pyramid_style)
+        assert shapely.contains(body.top.buffer(GRID_NOISE), footprints).all()
+
+    rows = scad_positions(generate_openscad(design))
+    for number, positions in by_body.items():
+        assert rows[rows[:, 3] == number][:, :3] == pytest.approx(positions, abs=0.0006)
+
+
+def test_color_tops_stay_on_the_floor_and_apart(svg):
+    design = build(svg(BADGE, **BADGE_SIZE), multicolor=True, keep_background=True)
+    tops = [body.top for body in design.bodies[1:]]
+    for top in tops:
+        assert top.difference(design.art).area < 0.01
+    for index, top in enumerate(tops):
+        for other in tops[index + 1:]:
+            assert top.intersection(other).area < 0.01
+
+
+def test_shapes_for_the_scad_sit_on_the_output_grid_with_no_specks(svg):
+    design = build(svg(BADGE, **BADGE_SIZE), multicolor=True, keep_background=True)
+    for geometry in [design.art, design.voids, *(body.top for body in design.bodies[1:])]:
+        steps = shapely.get_coordinates(geometry) / OUTPUT_STEP
+        assert steps == pytest.approx(np.round(steps), abs=1e-6)
+        for polygon in polygon_parts(geometry):
+            assert all(Polygon(ring).area > 0.01 for ring in [polygon.exterior, *polygon.interiors])
+
+
+def test_scad_has_one_color_branch_per_body_above_the_base(svg):
+    design = build(svg(BADGE, **BADGE_SIZE), multicolor=True, keep_background=True, color_depth=0.4)
+    scad = generate_openscad(design)
+    assert scad_value(scad, 'part') == '0'
+    assert scad_value(scad, 'color_depth') == '0.4'
+    assert scad_value(scad, 'color_bodies') == '[2, 3, 4]'
+    color_module = re.search(r'module color_2d\(body\) \{\n(.*?)^\}', scad, re.DOTALL | re.MULTILINE).group(1)
+    assert re.findall(r'if \(body == (\d+)\) \{', color_module) == ['2', '3', '4']
+    assert '//   1 = #111111 (base' in scad and '//   4 = #ffffff' in scad
+    assert scad.count('{') == scad.count('}')
+
+
+def test_color_depth_is_capped_at_the_base_thickness(svg):
+    design = build(svg(TWO_TONE), multicolor=True, base_thickness=1, color_depth=3)
+    assert scad_value(generate_openscad(design), 'color_depth') == '1'
+    assert any('run through the whole floor' in warning for warning in design.warnings)
+    assert not any('run through' in w for w in build(svg(TWO_TONE), base_thickness=1, color_depth=3).warnings)
+
+
+def test_a_speck_of_another_color_does_not_become_a_hole(svg):
+    art = ('<rect width="100" height="60" fill="#e63946"/>'
+           '<rect x="40" y="30" width="0.7" height="0.7" fill="#ffffff"/>')
+    design = build(svg(art, **BADGE_SIZE), multicolor=True, keep_background=True)
+    assert design.voids.is_empty
+    assert [body.fill for body in design.bodies] == ['#e63946']
+
+
+needs_openscad = pytest.mark.skipif(shutil.which('openscad') is None, reason='needs the OpenSCAD executable')
+
+
+def render_part(scad_path, part):
+    """Volume of one rendered part. Fails if OpenSCAD reports leaving anything out."""
+    stl_path = scad_path.with_name(f'part_{part}.stl')
+    result = subprocess.run(
+        ['openscad', '-o', str(stl_path), '-D', f'part={part}', str(scad_path)],
+        check=True, capture_output=True, text=True,
+    )
+    assert 'ERROR' not in result.stderr
+    return stl_volume(stl_path)
+
+
+@needs_openscad
+@pytest.mark.parametrize('void_mode', ['through', 'recess'])
+def test_rendered_bodies_add_up_to_the_whole_pad(svg, tmp_path, void_mode):
+    art = BADGE + '<circle cx="45" cy="50" r="4" fill="#abcdef"/>'
+    design = build(svg(art, **BADGE_SIZE), multicolor=True, keep_background=True, void_fills=('#abcdef',),
+                   void_mode=void_mode, target_width=60)
+    scad_path = tmp_path / 'pad.scad'
+    scad_path.write_text(generate_openscad(design))
+
+    assert design.voids.area > 10
+    whole = render_part(scad_path, 0)
+    volumes = {body.number: render_part(scad_path, body.number) for body in design.bodies}
+    assert sum(volumes.values()) == pytest.approx(whole, rel=1e-4)
+
+    pyramid = 16 * 2.5 / 3
+    by_body = design.positions_by_body()
+    for body in design.bodies[1:]:
+        expected = body.top.area * 0.6 + len(by_body[body.number]) * pyramid
+        assert volumes[body.number] == pytest.approx(expected, rel=0.01)
+
+
+@needs_openscad
+def test_colors_through_the_whole_floor_still_render(svg, tmp_path):
+    design = build(svg(TWO_TONE), multicolor=True, target_width=40, base_thickness=1, color_depth=1)
+    scad_path = tmp_path / 'pad.scad'
+    scad_path.write_text(generate_openscad(design))
+    whole = render_part(scad_path, 0)
+    assert render_part(scad_path, 1) + render_part(scad_path, 2) == pytest.approx(whole, rel=1e-4)
+
+
 # --- preview data -----------------------------------------------------------
 
 def test_preview_is_plain_json_matching_the_design(svg):
@@ -393,8 +555,7 @@ def test_scad_turns_pyramids_the_way_footprints_were_checked(svg):
 
 def test_scad_position_rows_keep_their_precision(svg):
     design = build(svg(THIN_DIAGONALS), target_width=120)
-    rows = re.findall(r'^    \[([-\d.]+), ([-\d.]+), ([-\d.]+)\],$', generate_openscad(design), re.MULTILINE)
-    assert np.array(rows, dtype=float) == pytest.approx(design.positions(), abs=0.0006)
+    assert scad_positions(generate_openscad(design))[:, :3] == pytest.approx(design.positions(), abs=0.0006)
 
 
 def stl_volume(stl_path):

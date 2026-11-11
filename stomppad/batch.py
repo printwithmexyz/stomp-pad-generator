@@ -1,4 +1,4 @@
-"""Turn SVG files on disk into .scad and .stl files, with an on-disk cache. No GUI imports."""
+"""Turn SVG files on disk into .scad, .stl and .3mf files, with an on-disk cache. No GUI imports."""
 
 import hashlib
 import json
@@ -13,8 +13,9 @@ from .packing import PackedRegion, pyramid_footprints
 from .pad import PadDesign, build_pad
 from .overlay import polygon_parts
 from .svg_parse import Region
+from .threemf import pad_3mf
 
-CACHE_VERSION = 2  # bump whenever the pipeline can produce a different design for the same input
+CACHE_VERSION = 3  # bump whenever the pipeline can produce a different design for the same input
 STL_RENDER_TIMEOUT_SECONDS = 300
 
 
@@ -117,11 +118,18 @@ def process_svg(svg_file, output_dir, settings, cache_dir=None, log=print, appro
     return scad_path
 
 
-def render_stl(scad_path, stl_path, openscad_path, log=print):
-    """Render a .scad to .stl with the OpenSCAD executable. Returns True on success."""
+def render_stl(scad_path, stl_path, openscad_path, log=print, part=None):
+    """
+    Render a .scad to .stl with the OpenSCAD executable. Returns True on
+    success. part picks one body of the pad. Left as None, the whole pad
+    renders in one piece.
+    """
+    command = [str(openscad_path), '-o', str(stl_path)]
+    if part is not None:
+        command += ['-D', f'part={part}']
     try:
         result = subprocess.run(
-            [str(openscad_path), '-o', str(stl_path), str(scad_path)],
+            [*command, str(scad_path)],
             capture_output=True, text=True, timeout=STL_RENDER_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
@@ -136,12 +144,47 @@ def render_stl(scad_path, stl_path, openscad_path, log=print):
     if result.returncode != 0:
         log(f'  OpenSCAD error: {result.stderr.strip()}')
         return False
+    # OpenSCAD exits cleanly after leaving a shape it could not process out of
+    # the model, so the STL exists but is missing material.
+    dropped = [line for line in result.stderr.splitlines() if line.startswith('ERROR:')]
+    if dropped:
+        log(f'  OpenSCAD left part of the model out: {dropped[0]}')
+        return False
     stl_path = Path(stl_path)
     if not stl_path.exists() or stl_path.stat().st_size == 0:
         log(f'  OpenSCAD finished but wrote no STL. {result.stderr.strip()}')
         return False
     log(f'  STL file: {stl_path.name}')
     return True
+
+
+def body_stl_path(scad_path, body):
+    scad_path = Path(scad_path)
+    role = 'base' if body.is_base else 'color'
+    return scad_path.with_name(f'{scad_path.stem}_{body.number}_{role}_{body.fill.lstrip("#")}.stl')
+
+
+def render_bodies(design, scad_path, openscad_path, log=print):
+    """
+    Render one STL per body next to the .scad. Returns {body number: path},
+    or None if any render failed.
+    """
+    paths = {}
+    for body in design.bodies:
+        stl_path = body_stl_path(scad_path, body)
+        if not render_stl(scad_path, stl_path, openscad_path, log, part=body.number):
+            return None
+        paths[body.number] = stl_path
+    return paths
+
+
+def export_3mf(design, stl_paths, output_path, log=print, standard_colors=False):
+    """Pack the body STLs from render_bodies into one 3MF with a part per filament."""
+    output_path = Path(output_path)
+    stl_by_body = {number: Path(path).read_bytes() for number, path in stl_paths.items()}
+    output_path.write_bytes(pad_3mf(design, stl_by_body, output_path.stem, standard_colors))
+    log(f'  3MF file: {output_path.name}')
+    return output_path
 
 
 def save_debug_visualization(design, output_file, log=print):
