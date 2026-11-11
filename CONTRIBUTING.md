@@ -38,18 +38,21 @@ npm run dev
 ```
 
 `npm install` runs `scripts/prepare.js` which copies the parent's
-`pyramid_position_calculator.py` into `public/` and downloads the
+`stomppad/` package into `public/stomppad/` and downloads the
 openscad-wasm release files (~8 MB, cached on disk). The web README has
 deploy notes: [web/README.md](web/README.md).
 
 ## Where to make a change
 
-The geometry pipeline is a single Python module:
-**`pyramid_position_calculator.py`**. Both the desktop GUI and the browser
-import it directly — there is no parallel implementation to keep in sync.
-If you fix a bug or change behavior here, both interfaces benefit
-immediately. The web project re-syncs the file on every `npm run dev` /
-`npm run build`, so no manual copying.
+The geometry pipeline is a single Python package: **`stomppad/`**. Both the
+desktop GUI and the browser import it directly — there is no parallel
+implementation to keep in sync. If you fix a bug or change behavior here,
+both interfaces benefit immediately. The web project re-syncs the package on
+every `npm run dev` / `npm run build`, so no manual copying.
+
+Run the tests with `python -m pytest` (needs `pytest`). Call GEOS set
+operations and buffers only through `stomppad/overlay.py`; the reason is in
+[docs/architecture.md](docs/architecture.md).
 
 When changing a function signature, audit both call sites:
 

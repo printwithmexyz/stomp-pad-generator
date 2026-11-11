@@ -12,7 +12,7 @@ exposed through two interfaces.
 | **Desktop GUI** | Bulk batches, real OS performance, STL rendering via local OpenSCAD | `python bulk_processor_gui.py` |
 | **Browser (Pyodide)** | Single SVGs, sharing a link, no install | `cd web && npm install && npm run dev` |
 
-Both share the same `pyramid_position_calculator.py`. Desktop runs it under a
+Both share the same `stomppad/` Python package. Desktop runs it under a
 `ProcessPoolExecutor`; browser runs it in WebAssembly via Pyodide. STL
 rendering is OpenSCAD on the desktop and openscad-wasm in the browser.
 
@@ -55,7 +55,8 @@ if they want STL rendering.
 
 ```
 .
-├── pyramid_position_calculator.py  # geometry pipeline (single source of truth)
+├── stomppad/                       # geometry pipeline (single source of truth)
+├── tests/                          # pytest suite: python -m pytest
 ├── bulk_processor_gui.py           # desktop tkinter GUI
 ├── bulk_processor.spec             # PyInstaller spec (used by CI)
 ├── web/                            # browser version (Vite + Pyodide + openscad-wasm)

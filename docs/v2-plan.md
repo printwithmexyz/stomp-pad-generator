@@ -30,12 +30,14 @@ Phases, each a review gate:
   `stomppad/openscad.py` writes it as a `.scad` with inline polygons and no
   SVG import. `stomppad/packing.py` places pyramids per region on one shared
   hex grid. Tests in `tests/test_pad_build.py`.
-- **B2. Desktop.** Call `build_pad` from the bulk processor, add the hole
-  toggle and recess depth to the Parameters tab, update the cache format and
-  PyInstaller spec.
-- **B3. Web.** Zip-sync the package into the web build, call `build_pad` from
-  `main.js`, add the same two controls, draw holes in the 2D preview. Then
-  delete `pyramid_position_calculator.py`.
+- **B2. Desktop (done).** The bulk processor calls `stomppad.batch`, the
+  Parameters tab has the hole toggle and recess depth, and the cache is keyed
+  on the SVG and every setting.
+- **B3. Web (wired, NOT ready to deploy).** `prepare.js` copies the package
+  into `public/stomppad/` with a manifest, `main.js` calls `build_pad`, the
+  page has the same controls, and the 2D preview draws holes. It works end to
+  end in Chrome, but see the Pyodide crash under Known gaps before deploying.
+  `pyramid_position_calculator.py` is now unused and can be deleted.
 - **C. Multicolor export.** One body per color plus the base, STL set, 3MF.
 - **D. Region list UI.** Show regions, warnings, and drop / recolor controls
   in web and desktop.
@@ -48,9 +50,21 @@ Fixed on the way through B1, both present in `pyramid_position_calculator.py`:
 - The skeleton step breaks ties at random, so the same SVG could give a
   different pyramid count from run to run. It is now seeded.
 
-Known gaps after Phase A, none blocking:
+Known gaps:
 
-- Not yet run inside Pyodide. Tested on CPython with shapely 2.0.6 and 2.2.
+- **Blocking for the web app: GEOS errors kill Pyodide.** In Pyodide (checked
+  on 0.26.4 and 0.29.0) a C++ exception from GEOS is not turned into a Python
+  exception. It ends the runtime and the page needs a reload. Set operations
+  no longer raise (`stomppad/overlay.py` runs them on a fixed-precision
+  grid), but buffers still can: GEOS recovers from a failed buffer by catching
+  its own exception, which Pyodide cannot do. Measured on 91 real icons in
+  Pyodide, 3 crash inside `robust_buffer`. The page now detects the crash and
+  says so instead of hanging. The proposed fix is to do offsets with Clipper
+  (`pyclipper`, already shipped in Pyodide, one new desktop dependency): a
+  prototype cut the crashes to 1 in 91, and that one did not reproduce alone.
+  Desktop is unaffected: 720 icons, no errors.
+- The suite passes inside Pyodide 0.26.4 (shapely 2.0.2, scikit-image 0.23.2)
+  apart from the desktop-only batch tests.
 - SVGs with DOCTYPE entity declarations (Illustrator "preserve editing
   capabilities") raise a clear error on desktop, where `defusedxml` is
   installed, and parse in the browser, where it is not.

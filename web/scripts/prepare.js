@@ -1,11 +1,11 @@
 // Sync runtime assets into public/ so the same-origin fetches at runtime work.
-//   1. Calculator module (single source of truth in the parent project).
+//   1. The stomppad geometry package (single source of truth in the parent project).
 //   2. openscad-wasm (downloaded from files.openscad.org, unzipped, cached).
 // Runs automatically before `dev` and `build`; can also be invoked via `npm run prepare`.
 
 import {
   copyFileSync, mkdirSync, existsSync, writeFileSync, readFileSync,
-  rmSync, unlinkSync,
+  readdirSync, rmSync, unlinkSync,
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -17,15 +17,24 @@ const publicDir = resolve(root, 'public');
 
 mkdirSync(publicDir, { recursive: true });
 
-// --- 1. calculator -----------------------------------------------------------
-const calcSrc = resolve(root, '..', 'pyramid_position_calculator.py');
-const calcDest = resolve(publicDir, 'pyramid_position_calculator.py');
-if (!existsSync(calcSrc)) {
-  console.error(`prepare.js: calculator source not found at ${calcSrc}`);
+// --- 1. geometry package -----------------------------------------------------
+// Pyodide can't import a package straight off a web server. Copy every module
+// next to a manifest that main.js walks to rebuild the package in Pyodide's FS.
+const packageSrc = resolve(root, '..', 'stomppad');
+const packageDest = resolve(publicDir, 'stomppad');
+if (!existsSync(packageSrc)) {
+  console.error(`prepare.js: stomppad package not found at ${packageSrc}`);
   process.exit(1);
 }
-copyFileSync(calcSrc, calcDest);
-console.log(`prepare.js: synced calculator -> ${calcDest}`);
+rmSync(packageDest, { recursive: true, force: true });
+mkdirSync(packageDest);
+const packageModules = readdirSync(packageSrc).filter((name) => name.endsWith('.py')).sort();
+for (const name of packageModules) {
+  copyFileSync(resolve(packageSrc, name), resolve(packageDest, name));
+}
+writeFileSync(resolve(packageDest, 'manifest.json'), JSON.stringify(packageModules));
+rmSync(resolve(publicDir, 'pyramid_position_calculator.py'), { force: true });
+console.log(`prepare.js: synced ${packageModules.length} stomppad modules -> ${packageDest}`);
 
 // --- 2. openscad-wasm --------------------------------------------------------
 // We use the official OpenSCAD playground build (manifold backend, 2025+)

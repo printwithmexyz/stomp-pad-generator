@@ -9,10 +9,11 @@ jsDelivr CDN on first visit.
 
 ## Source-of-truth
 
-`pyramid_position_calculator.py` lives in the repository root. The `prepare`
-script (run automatically before `dev` and `build`) copies it into
-`public/pyramid_position_calculator.py`, which Pyodide fetches and imports at
-runtime. Edit the parent file, restart `npm run dev`, and changes propagate.
+The `stomppad/` package lives in the repository root. The `prepare` script
+(run automatically before `dev` and `build`) copies its modules into
+`public/stomppad/` next to a `manifest.json`, which the page walks to rebuild
+the package inside Pyodide. Edit the parent package, restart `npm run dev`,
+and changes propagate.
 
 ## Local development
 
@@ -58,6 +59,10 @@ That's it. Vercel runs `npm install` (which triggers `prepare` via the
   installs. Bump `OPENSCAD_VERSION` in `prepare.js` to upgrade.
 - Pyodide can't use multiprocessing, so multi-file uploads run sequentially.
   The desktop app's process pool is the way to go for bulk batches.
+- A geometry-library error inside Pyodide ends the Python runtime instead of
+  raising. The page reports it and asks for a reload. Roughly 3 in 100 real
+  logos still trigger this; see "Known gaps" in
+  [../docs/v2-plan.md](../docs/v2-plan.md). The desktop app is not affected.
 
 ## See also
 

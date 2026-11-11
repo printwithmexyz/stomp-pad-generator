@@ -6,34 +6,49 @@ This doc is for contributors. End users want
 ## Single source of truth
 
 ```
-pyramid_position_calculator.py
+stomppad/                     (Python package)
         │
         ├── used by → bulk_processor_gui.py    (desktop, runs in worker processes)
-        └── synced into web/public/ at build → loaded by Pyodide in the browser
+        └── synced into web/public/stomppad/ at build → loaded by Pyodide in the browser
 ```
 
-The whole geometry pipeline (SVG → polygon → medial-axis skeleton →
-hex-packed pyramid placement → OpenSCAD source) lives in one Python module.
-Both interfaces import the same functions; nothing is reimplemented per
-platform. The web project's `scripts/prepare.js` copies the parent file into
-`web/public/pyramid_position_calculator.py` before every `dev` and `build`
-so the browser and desktop never drift.
+The whole geometry pipeline lives in one Python package. Both interfaces call
+`stomppad.pad.build_pad(svg, PadSettings)` and
+`stomppad.openscad.generate_openscad(design)`; nothing is reimplemented per
+platform. The web project's `scripts/prepare.js` copies every module into
+`web/public/stomppad/` with a `manifest.json` before every `dev` and `build`,
+and `main.js` rebuilds the package in Pyodide's filesystem from that
+manifest, so the browser and desktop never drift.
+
+| Module | Job |
+|---|---|
+| `svg_parse.py` | SVG → colored regions, resolved the way a browser paints it |
+| `refine.py` | scale to mm, cleanup, printability warnings, drop / recolor |
+| `packing.py` | medial-axis centerline and hex-packed pyramid placement |
+| `pad.py` | `PadSettings`, `PadDesign`, `build_pad`: the pipeline end to end |
+| `openscad.py` | a design as `.scad` text with inline polygons (no SVG import) |
+| `overlay.py` | the only place GEOS set operations and buffers are called |
+| `batch.py` | desktop only: files on disk, cache, STL render, debug picture |
+
+Python owns all geometry. OpenSCAD only extrudes and subtracts the polygons
+it is handed, which is why coordinates can never disagree between the two.
+
+### GEOS errors and Pyodide
+
+In Pyodide a C++ exception from GEOS is not converted to a Python exception:
+it ends the runtime. `overlay.py` therefore runs union, difference and
+intersection on a fixed-precision grid, which cannot raise. Buffers still
+can; see "Known gaps" in [v2-plan.md](v2-plan.md). New geometry code must go
+through `overlay.py` instead of calling `.union()`, `.difference()`,
+`.intersection()` or `.buffer()` on a shape.
 
 ## Logger callback pattern
 
-Every public function in `pyramid_position_calculator.py` accepts an optional
-`logger=` callable:
-
-```python
-def parse_svg_to_polygon(svg_file, ..., logger=None):
-    _log(logger, f"  SVG parsed: {len(all_points)} points sampled")
-```
-
-`_log(logger, msg)` calls `logger(msg)` if provided, else falls back to
-`print`. This is what lets the desktop GUI surface calculator output in its
-Console tab and the browser surface it in its on-page console — both pass
-their own callback. Standalone use (`python pyramid_position_calculator.py`)
-still prints to stdout.
+`build_pad` and the functions in `batch.py` take a callable that receives
+each log line; without one they `print`. The desktop GUI passes a callback
+that feeds its Console tab, worker processes pass one that writes to a queue,
+and the browser passes a JS function that appends to the on-page console.
+Each file logs one summary line and then a `NOTE:` line per warning.
 
 ## Desktop concurrency model
 
@@ -74,15 +89,22 @@ What does run concurrently in the browser:
 ## Web ↔ Pyodide interop
 
 `web/src/main.js` writes the uploaded SVG to Pyodide's virtual FS as
-`/input.svg`, sets the parameter dict via `pyodide.toPy(params)` as a global,
-then calls into the calculator. The Python logger callback marshals strings
-back to the JS `log()` function for the on-page console.
+`/input.svg`, passes the form values via `pyodide.toPy(settings)`, and calls
+`build_pad(..., PadSettings.from_params(js_settings))`. `from_params` is the
+same constructor the desktop app uses and rejects names it does not know, so
+a renamed form field fails loudly. The Python logger callback marshals
+strings back to the JS `log()` function for the on-page console.
 
-After processing, preview data is materialized into a Python dict
-(polygon exterior rings, skeleton points, valid positions) and pulled to JS
-via `pyodide.globals.get('preview_data').toJs({ dict_converter: Object.fromEntries })`.
-The 2D canvas draws from that data; the 3D canvas (when STL is enabled)
-parses the openscad-wasm STL output via three.js's `STLLoader`.
+After processing, `design.preview()` returns the art, holes, centerline and
+pyramid positions as plain lists, pulled to JS via
+`pyodide.globals.get('preview_data').toJs({ dict_converter: Object.fromEntries })`.
+The 2D canvas draws from that data (flipping Y, since the design is Y-up);
+the 3D canvas (when STL is enabled) parses the openscad-wasm STL output via
+three.js's `STLLoader`.
+
+If the geometry library crashes the runtime, the promise from
+`runPythonAsync` never settles. `main.js` listens for the uncaught global
+error instead, marks the file failed, and asks for a reload.
 
 ## openscad-wasm loader gotcha
 
@@ -111,14 +133,15 @@ it themselves if they want STL rendering.
 ## File map
 
 ```
-pyramid_position_calculator.py    geometry pipeline + standalone main()
+stomppad/                         geometry package (see the module table above)
+tests/                            pytest suite: python -m pytest
 bulk_processor_gui.py             tkinter GUI + process pool + STL queue
 bulk_processor.spec               PyInstaller spec (used by CI)
 .github/workflows/build.yml       cross-platform binary builds + releases
 web/
 ├── index.html                    upload form + console + result cards
 ├── package.json                  vite + three (Pyodide loaded from CDN)
-├── scripts/prepare.js            sync calc + download openscad-wasm
+├── scripts/prepare.js            sync stomppad + download openscad-wasm
 └── src/
     ├── main.js                   Pyodide bootstrap + processing loop
     ├── scad-renderer.js          openscad-wasm wrapper (Vite workaround)
