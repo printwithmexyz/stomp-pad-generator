@@ -92,9 +92,12 @@ class PadDesign:
     def positions(self):
         return np.vstack([packed.positions for packed in self.packed.values()])
 
-
-def _log(logger, message):
-    (logger or print)(message)
+    def describe(self):
+        """Log lines: one summary, then every warning."""
+        colors = len({region.fill for region in self.regions})
+        summary = (f'  {len(self.regions)} region(s) in {colors} color(s), '
+                   f'{self.width:.1f} x {self.height:.1f} mm, {len(self.positions())} pyramids')
+        return [summary] + [f'  NOTE: {warning}' for warning in self.warnings]
 
 
 def _as_one_color(regions):
@@ -176,9 +179,6 @@ def build_pad(svg_file, settings=PadSettings(), logger=None):
     warnings += _assembly_notes(art, voids, settings)
 
     design = PadDesign(settings, regions, art, voids, packed, warnings)
-    pyramid_count = len(design.positions())
-    _log(logger, f'  {len(regions)} region(s) in {len({r.fill for r in regions})} color(s), '
-                 f'{design.width:.1f} x {design.height:.1f} mm, {pyramid_count} pyramids')
-    for warning in warnings:
-        _log(logger, f'  NOTE: {warning}')
+    for line in design.describe():
+        (logger or print)(line)
     return design
