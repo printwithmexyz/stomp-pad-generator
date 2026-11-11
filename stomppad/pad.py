@@ -92,12 +92,36 @@ class PadDesign:
     def positions(self):
         return np.vstack([packed.positions for packed in self.packed.values()])
 
+    def preview(self):
+        """The design as plain numbers and lists, for a frontend to draw."""
+        packing = self.settings.packing
+        return {
+            'width': self.width,
+            'height': self.height,
+            'art': _ring_lists(self.art),
+            'voids': _ring_lists(self.voids),
+            'voids_recessed': self.voids_are_recessed,
+            'skeleton': np.vstack([packed.skeleton for packed in self.packed.values()]).tolist(),
+            'positions': self.positions().tolist(),
+            'pyramid_size': packing.pyramid_size,
+            'pyramid_sides': packing.pyramid_style,
+            'warnings': list(self.warnings),
+        }
+
     def describe(self):
         """Log lines: one summary, then every warning."""
         colors = len({region.fill for region in self.regions})
         summary = (f'  {len(self.regions)} region(s) in {colors} color(s), '
                    f'{self.width:.1f} x {self.height:.1f} mm, {len(self.positions())} pyramids')
         return [summary] + [f'  NOTE: {warning}' for warning in self.warnings]
+
+
+def _ring_lists(geometry):
+    """Each polygon as a list of rings of [x, y] points: the outline first, then its holes."""
+    return [
+        [[[float(x), float(y)] for x, y in ring.coords] for ring in (polygon.exterior, *polygon.interiors)]
+        for polygon in polygon_parts(geometry)
+    ]
 
 
 def _as_one_color(regions):

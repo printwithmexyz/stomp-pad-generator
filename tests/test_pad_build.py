@@ -1,3 +1,4 @@
+import json
 import math
 import re
 import shutil
@@ -314,6 +315,24 @@ def test_region_too_narrow_gets_no_pyramids_and_a_warning(svg):
     assert len(design.positions()) == 0
     assert any('too narrow' in warning for warning in design.warnings)
     assert 'pyramid_positions = [\n];' in generate_openscad(design)
+
+
+# --- preview data -----------------------------------------------------------
+
+def test_preview_is_plain_json_matching_the_design(svg):
+    design = build(svg(SMILEY), target_width=90, void_mode='recess')
+    preview = json.loads(json.dumps(design.preview()))
+    rebuilt_art = shapely.union_all([Polygon(rings[0], rings[1:]) for rings in preview['art']])
+    rebuilt_voids = shapely.union_all([Polygon(rings[0], rings[1:]) for rings in preview['voids']])
+    assert rebuilt_art.symmetric_difference(design.art).area == pytest.approx(0, abs=1e-9)
+    assert rebuilt_voids.symmetric_difference(design.voids).area == pytest.approx(0, abs=1e-9)
+    assert rebuilt_voids.area > 100
+    assert (preview['width'], preview['height']) == pytest.approx((design.width, design.height))
+    assert preview['positions'] == design.positions().tolist()
+    assert len(preview['skeleton']) == sum(len(p.skeleton) for p in design.packed.values())
+    assert preview['voids_recessed'] is True
+    assert (preview['pyramid_size'], preview['pyramid_sides']) == (4.0, 4)
+    assert preview['warnings'] == design.warnings
 
 
 # --- OpenSCAD output --------------------------------------------------------
