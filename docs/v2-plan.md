@@ -16,6 +16,7 @@ changed in the second interview:
 | Shapes inside shapes | Even-odd nesting across elements decides hole vs body | **Paint order.** Regions are what a browser would show: later elements cover earlier ones, fill rules decide holes within a path. Anything painted in the dropped background's color, or in a listed void color, cuts a hole. |
 | Color layout | Base is a colorable body | **Shared base, colored top.** One color for the bottom layers and rim; each color region owns its top layers and pyramids. |
 | 3MF | Generic only | **Generic plus Bambu part-to-filament metadata**, format to be verified against a real Bambu Studio export. |
+| Holes in the artwork | Always cut through | **Toggle.** `void_mode='through'` cuts enclosed holes through the pad, rim and all. `void_mode='recess'` keeps a floor `recess_depth` below the surface the pyramids stand on, so islands inside a hole stay attached. A recess as deep as the base falls back to through. |
 
 Phases, each a review gate:
 
@@ -24,15 +25,28 @@ Phases, each a review gate:
   order, background drop, void fills, scaling to mm, cleanup (near-duplicate
   colors, slivers, specks, pinholes), printability warnings, drop / recolor
   overrides. Tests in `tests/test_svg_regions.py` (`python -m pytest`).
-- **B. Wire in.** Pack per region with holes respected, emit region polygons
-  in the `.scad`, retire `parse_svg_to_polygon`, zip-sync the package into the
-  web build, update the desktop app and PyInstaller spec.
+- **B1. Pad build (done, not wired in).** `stomppad/pad.py` is the one entry
+  point: `build_pad(svg, PadSettings)` returns a `PadDesign`, and
+  `stomppad/openscad.py` writes it as a `.scad` with inline polygons and no
+  SVG import. `stomppad/packing.py` places pyramids per region on one shared
+  hex grid. Tests in `tests/test_pad_build.py`.
+- **B2. Desktop.** Call `build_pad` from the bulk processor, add the hole
+  toggle and recess depth to the Parameters tab, update the cache format and
+  PyInstaller spec.
+- **B3. Web.** Zip-sync the package into the web build, call `build_pad` from
+  `main.js`, add the same two controls, draw holes in the 2D preview. Then
+  delete `pyramid_position_calculator.py`.
 - **C. Multicolor export.** One body per color plus the base, STL set, 3MF.
 - **D. Region list UI.** Show regions, warnings, and drop / recolor controls
   in web and desktop.
 
-Open for Phase B: whether a void inside the artwork is a through-hole (today's
-behavior for holes) or a recess that shows the base color.
+Fixed on the way through B1, both present in `pyramid_position_calculator.py`:
+
+- Pyramid rotation was mirrored. Angles were measured with Y down and applied
+  with Y up, so on a diagonal stroke the pyramids turned the wrong way and
+  could overhang a thin one. Coordinates are now Y up from the start.
+- The skeleton step breaks ties at random, so the same SVG could give a
+  different pyramid count from run to run. It is now seeded.
 
 Known gaps after Phase A, none blocking:
 

@@ -597,7 +597,7 @@ def _visible_by_fill(paint):
 
 def polygon_parts(geometry):
     if geometry.geom_type == 'Polygon':
-        return [geometry]
+        return [] if geometry.is_empty else [geometry]
     return [part for g in getattr(geometry, 'geoms', []) for part in polygon_parts(g)]
 
 
