@@ -57,11 +57,15 @@ Known gaps:
   0.29.0) a C++ exception from GEOS is not turned into a Python exception. It
   ends the runtime and the page needs a reload. With GEOS buffers, 3 of 91
   real icons crashed. `stomppad/overlay.py` now runs set operations on a
-  fixed-precision grid and offsets with Clipper (`pyclipper`), so GEOS is
-  never asked to do anything it can fail at. Measured in Pyodide on 354 real
-  icons, both hole modes: 0 crashes. The page still detects a crash and asks
-  for a reload if one ever happens. Nothing proves no input can trigger one,
-  so new geometry code has to keep to the rule in `docs/architecture.md`.
+  fixed-precision grid, offsets and repairs with Clipper (`pyclipper`), and
+  simplifies with its own Douglas-Peucker pass, so GEOS is never asked to do
+  anything it can fail at. The simplifier was the last to go: GEOS's crashed
+  on one icon (simple-icons `criticalrole.svg`) only inside a batch, never
+  alone. Measured in Pyodide on 354 real icons, both hole modes, three
+  separate passes over the final code: 0 crashes. The page still detects a
+  crash and asks for a reload if one ever happens. Nothing proves no input
+  can trigger one, so new geometry code has to keep to the rule in
+  `docs/architecture.md`.
 - The suite passes inside Pyodide 0.26.4 (shapely 2.0.2, scikit-image 0.23.2)
   apart from the desktop-only batch tests.
 - SVGs with DOCTYPE entity declarations (Illustrator "preserve editing
