@@ -1,5 +1,7 @@
 """Write a pad design as OpenSCAD source. All geometry is inline, so no SVG is imported."""
 
+from shapely.geometry.polygon import orient
+
 from .svg_parse import polygon_parts
 
 
@@ -8,6 +10,7 @@ def _number(value):
 
 
 def _polygon_statement(polygon):
+    polygon = orient(polygon)
     points, paths = [], []
     for ring in [polygon.exterior, *polygon.interiors]:
         corners = list(ring.coords)[:-1]
@@ -41,7 +44,7 @@ outline_height = {_number(settings.outline_height)};
 
 pyramid_size = {_number(settings.packing.pyramid_size)};
 pyramid_height = {_number(settings.pyramid_height)};
-pyramid_style = {settings.pyramid_style};
+pyramid_style = {settings.packing.pyramid_style};
 
 // Enclosed holes in the artwork. false cuts them through the pad.
 // true leaves a floor recess_depth below the surface the pyramids stand on.

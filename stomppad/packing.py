@@ -13,10 +13,19 @@ TANGENT_SAMPLE_DISTANCE = 3.0  # mm of centerline used to judge its direction
 @dataclass(frozen=True)
 class PackingSettings:
     pyramid_size: float = 4.0
+    pyramid_style: int = 4  # sides of the pyramid base
     pyramid_spacing: float = 1.0
     safety_margin: float = 0.5
     include_rotation: bool = True
     skeleton_resolution: float = 0.3
+
+    def __post_init__(self):
+        if self.pyramid_size <= 0 or self.skeleton_resolution <= 0:
+            raise ValueError('pyramid_size and skeleton_resolution must be greater than 0')
+        if self.pyramid_spacing < 0 or self.safety_margin < 0:
+            raise ValueError('pyramid_spacing and safety_margin cannot be negative')
+        if self.pyramid_style < 3:
+            raise ValueError('pyramid_style needs at least 3 sides')
 
 
 @dataclass
@@ -57,7 +66,11 @@ def hex_grid(bounds, pitch):
 
 
 def _centerline_angles(centers, skeleton):
-    """Direction of the nearby centerline at each center, in degrees."""
+    """
+    Direction of the nearby centerline at each center, in degrees from 0 to 180.
+    A centerline has no front or back, and the sign eigh gives its direction
+    varies by platform, so the angle is folded into half a turn.
+    """
     angles = np.zeros(len(centers))
     if len(skeleton) < 2 or not len(centers):
         return angles
@@ -68,13 +81,13 @@ def _centerline_angles(centers, skeleton):
         offsets = skeleton[nearby] - skeleton[nearby].mean(axis=0)
         _, directions = np.linalg.eigh(offsets.T @ offsets)
         principal = directions[:, -1]
-        angles[index] = np.degrees(np.arctan2(principal[1], principal[0]))
+        angles[index] = np.degrees(np.arctan2(principal[1], principal[0])) % 180
     return angles
 
 
-def pyramid_footprints(positions, pyramid_size):
-    """Square pyramid bases as polygons, matching rotate(45 + rotation) in the .scad."""
-    corner_angles = np.radians(positions[:, 2, None] + 45 + np.array([0, 90, 180, 270]))
+def pyramid_footprints(positions, pyramid_size, sides=4):
+    """Pyramid bases as polygons, matching rotate(45 + rotation) cylinder($fn = sides) in the .scad."""
+    corner_angles = np.radians(positions[:, 2, None] + 45 + np.arange(sides) * 360 / sides)
     corner_radius = pyramid_size / np.sqrt(2)
     corners = np.stack([
         positions[:, 0, None] + corner_radius * np.cos(corner_angles),
@@ -94,7 +107,8 @@ def pack_region(geometry, grid, settings):
     angles = _centerline_angles(centers, skeleton) if settings.include_rotation else np.zeros(len(centers))
     candidates = np.column_stack([centers, angles])
     shapely.prepare(safe_area)
-    fits = shapely.contains(safe_area, pyramid_footprints(candidates, settings.pyramid_size))
+    footprints = pyramid_footprints(candidates, settings.pyramid_size, settings.pyramid_style)
+    fits = shapely.contains(safe_area, footprints)
     return PackedRegion(candidates[fits], skeleton)
 
 

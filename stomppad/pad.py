@@ -1,6 +1,6 @@
 """SVG in, pad design out: the one pipeline the desktop and web apps both call."""
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 
 import numpy as np
 from shapely import affinity
@@ -26,7 +26,6 @@ class PadSettings:
     outline_offset: float = 2.0
     outline_height: float = 0.8
     pyramid_height: float = 2.5
-    pyramid_style: int = 4
 
     # 'through' cuts enclosed holes through the pad. 'recess' leaves a floor
     # recess_depth below the surface the pyramids stand on.
@@ -39,8 +38,34 @@ class PadSettings:
     def __post_init__(self):
         if self.void_mode not in VOID_MODES:
             raise ValueError(f'void_mode must be one of {VOID_MODES}, got {self.void_mode!r}')
-        if self.recess_depth < 0:
-            raise ValueError('recess_depth cannot be negative')
+        for name in ('target_width', 'base_thickness', 'pyramid_height'):
+            if getattr(self, name) <= 0:
+                raise ValueError(f'{name} must be greater than 0')
+        for name in ('outline_offset', 'outline_height', 'recess_depth'):
+            if getattr(self, name) < 0:
+                raise ValueError(f'{name} cannot be negative')
+
+    @property
+    def recesses_voids(self):
+        return self.void_mode == 'recess' and self.recess_depth < self.base_thickness
+
+    @classmethod
+    def from_params(cls, params):
+        """
+        Settings from the flat name -> value mapping both apps collect from
+        their forms. Missing names keep their defaults, and a target_height
+        of 0 means no height limit.
+        """
+        packing_names = {f.name for f in fields(PackingSettings)}
+        own_names = {f.name for f in fields(cls)} - {'packing', 'cleanup'}
+        unknown = set(params) - packing_names - own_names
+        if unknown:
+            raise ValueError(f'Unknown settings: {sorted(unknown)}')
+        own = {name: value for name, value in params.items() if name in own_names}
+        if not own.get('target_height'):
+            own['target_height'] = None
+        packing = PackingSettings(**{n: v for n, v in params.items() if n in packing_names})
+        return cls(packing=packing, **own)
 
 
 @dataclass
@@ -62,8 +87,7 @@ class PadDesign:
 
     @property
     def voids_are_recessed(self):
-        return (self.settings.void_mode == 'recess'
-                and self.settings.recess_depth < self.settings.base_thickness)
+        return self.settings.recesses_voids
 
     def positions(self):
         return np.vstack([packed.positions for packed in self.packed.values()])
@@ -101,6 +125,26 @@ def _enclosed_holes(art):
     return outlines.difference(art)
 
 
+def _assembly_notes(art, voids, settings):
+    """What the rim does to the finished shape that the flat artwork doesn't show."""
+    notes = []
+    if settings.void_mode == 'recess' and not settings.recesses_voids:
+        notes.append('Recess depth is at least the base thickness, so holes are cut through.')
+
+    footprint_source = robust_union([art, voids]) if settings.recesses_voids else art
+    if not settings.recesses_voids:
+        filled_in = [v for v in polygon_parts(voids) if v.buffer(-settings.outline_offset).is_empty]
+        if filled_in:
+            notes.append(
+                f'{len(filled_in)} hole(s) are narrower than twice the outline offset, so the rim '
+                'fills them in. Recess the holes or reduce the outline offset to keep them.'
+            )
+    pieces = len(polygon_parts(footprint_source.buffer(settings.outline_offset)))
+    if pieces > 1:
+        notes.append(f'The pad prints as {pieces} separate pieces.')
+    return notes
+
+
 def build_pad(svg_file, settings=PadSettings(), logger=None):
     """Parse, scale, clean and pack an SVG. Raises ValueError if nothing printable is left."""
     parsed = parse_svg(
@@ -129,8 +173,7 @@ def build_pad(svg_file, settings=PadSettings(), logger=None):
     warnings += [warning.message for warning in printability_warnings(
         regions, settings.packing.pyramid_size, settings.packing.safety_margin,
     )]
-    if settings.void_mode == 'recess' and settings.recess_depth >= settings.base_thickness:
-        warnings.append('Recess depth is at least the base thickness, so holes are cut through.')
+    warnings += _assembly_notes(art, voids, settings)
 
     design = PadDesign(settings, regions, art, voids, packed, warnings)
     pyramid_count = len(design.positions())
