@@ -239,14 +239,10 @@ def without_specks(geometry, width):
     A later overlay on a slightly different grid can throw on detail that
     fine, so a shape pieced together from such scraps goes through here
     before GEOS sees it again.
-
-    The regrow after shaving uses round joins on purpose. Mitres would grow
-    two tips that met at a point straight back into each other, and parts
-    that touch at one point extrude into a solid no mesh can describe.
     """
     radius = width / 2
     filled = robust_buffer(robust_buffer(geometry, radius, 'mitre'), -radius, 'mitre')
-    return robust_buffer(robust_buffer(filled, -radius, 'mitre'), radius, 'round')
+    return robust_buffer(robust_buffer(filled, -radius, 'mitre'), radius, 'mitre')
 
 
 def _lines(geometry, closed):

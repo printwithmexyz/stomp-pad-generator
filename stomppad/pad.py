@@ -7,6 +7,7 @@ import numpy as np
 import shapely
 from shapely import affinity
 from shapely.geometry import Polygon
+from shapely.strtree import STRtree
 
 from .packing import PackingSettings, pack_regions, require_in_range
 from .refine import (
@@ -21,6 +22,7 @@ from .overlay import (
     polygon_parts,
     robust_buffer,
     robust_difference,
+    robust_simplify,
     robust_union,
     snapped,
     without_specks,
@@ -33,10 +35,11 @@ MAX_PAD_SIZE = 2000  # mm
 # OpenSCAD works at about 0.000015 mm. A hole or sliver near that size
 # collapses there, the extruded mesh comes out open, and OpenSCAD drops the
 # shape from the render with nothing but "mesh is not closed" in its log.
-# Two parts touching at a single point do the same. Set operations leave
-# such specks along every seam, so shapes that go into the .scad lose
-# anything narrower than SMALLEST_DETAIL and then sit on the OUTPUT_STEP
-# grid, which is the precision the .scad is written at.
+# Outlines that touch at a single point do the same, and corners a few
+# thousandths apart trip assertions in its geometry kernel. Set operations
+# leave all three along every seam, so shapes that go into the .scad are put
+# through _tidy and then sit on the OUTPUT_STEP grid, which is the precision
+# the .scad is written at.
 OUTPUT_STEP = 1e-4  # mm
 
 PAD_LIMITS = {
@@ -255,9 +258,31 @@ def _close_gaps(geometry, radius):
     return robust_buffer(grown, -radius, join_style='mitre')
 
 
+def _outlines_touch(geometry):
+    """Whether two rings of the shape come closer than cleanup would ever leave a real gap."""
+    rings = [
+        ring for polygon in polygon_parts(geometry) for ring in (polygon.exterior, *polygon.interiors)
+    ]
+    if len(rings) < 2:
+        return False
+    one, other = STRtree(rings).query(rings, predicate='dwithin', distance=SMALLEST_DETAIL / 2)
+    return bool((one != other).any())
+
+
 def _tidy(geometry):
-    """A shape OpenSCAD can extrude: see SMALLEST_DETAIL."""
-    return snapped(without_specks(geometry, SMALLEST_DETAIL), OUTPUT_STEP)
+    """
+    A shape OpenSCAD can extrude: nothing narrower than SMALLEST_DETAIL, no
+    corners crowded together, and no outline touching another.
+
+    Shaving off a neck regrows its two sides as sharp tips that meet at a
+    point, as shapes drawn corner to corner already do. Only then is the
+    whole shape drawn in by a hair, which pulls the tips apart. Any other
+    shape keeps its exact outline.
+    """
+    cleared = robust_simplify(without_specks(geometry, SMALLEST_DETAIL), SMALLEST_DETAIL / 4)
+    if _outlines_touch(cleared):
+        cleared = robust_buffer(cleared, -SMALLEST_DETAIL / 4, join_style='mitre')
+    return snapped(cleared, OUTPUT_STEP)
 
 
 def _enclosed_holes(art):

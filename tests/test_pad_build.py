@@ -445,10 +445,7 @@ def test_shapes_for_the_scad_sit_on_the_output_grid_with_no_specks(svg):
 
 def test_tidy_clears_what_openscad_would_choke_on():
     plate = box(0, 0, 20, 10).difference(box(5, 5, 5.0003, 5.0003)).union(box(20, 4, 22, 4.0003))
-    tidied = _tidy(plate)
-    assert len(tidied.interiors) == 0
-    assert tidied.bounds == pytest.approx((0, 0, 20, 10), abs=GRID_NOISE)
-    assert tidied.symmetric_difference(box(0, 0, 20, 10)).area < 1e-3
+    assert _tidy(plate).equals(box(0, 0, 20, 10))
 
 
 needs_openscad = pytest.mark.skipif(shutil.which('openscad') is None, reason='needs the OpenSCAD executable')

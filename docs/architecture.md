@@ -68,11 +68,12 @@ as two squares meeting corner to corner do: the extrusion is not a solid any
 mesh can describe, and the whole cavity cut goes missing. Two defences:
 
 - `pad._tidy` removes anything narrower than `SMALLEST_DETAIL` (0.01 mm) from
-  every shape bound for the `.scad`, leaves parts that met at a point either
-  0.005 mm apart or joined by a real neck, and snaps the result to
-  `OUTPUT_STEP`, the precision the file is written at. Set operations leave
-  specks that small along every seam, so any new shape written into the
-  `.scad` needs the same treatment.
+  every shape bound for the `.scad`, thins out corners crowded a few
+  thousandths apart (those trip assertions in OpenSCAD's CGAL kernel), pulls
+  outlines that touch at a point a few thousandths apart, and snaps the
+  result to `OUTPUT_STEP`, the precision the file is written at. Set
+  operations leave such debris along every seam, so any new shape written
+  into the `.scad` needs the same treatment.
 - `batch.render_stl` fails the render, and deletes the STL, when OpenSCAD's
   log has an `ERROR:` line or the STL has no facets. The web renderer does
   not check yet.
