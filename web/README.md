@@ -60,9 +60,10 @@ That's it. Vercel runs `npm install` (which triggers `prepare` via the
 - Pyodide can't use multiprocessing, so multi-file uploads run sequentially.
   The desktop app's process pool is the way to go for bulk batches.
 - A geometry-library error inside Pyodide ends the Python runtime instead of
-  raising. The page reports it and asks for a reload. Roughly 3 in 100 real
-  logos still trigger this; see "Known gaps" in
-  [../docs/v2-plan.md](../docs/v2-plan.md). The desktop app is not affected.
+  raising. The pipeline is built so the library is never asked to do anything
+  it can fail at (354 real logos, no crashes), but if it ever happens the
+  page reports it and asks for a reload. Background in
+  [../docs/architecture.md](../docs/architecture.md).
 
 ## See also
 
