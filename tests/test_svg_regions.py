@@ -17,7 +17,13 @@ from stomppad import (
     printability_warnings,
     scale_regions_to_mm,
 )
-from stomppad.overlay import polygon_parts, robust_difference, robust_intersection, robust_union
+from stomppad.overlay import (
+    polygon_parts,
+    robust_buffer,
+    robust_difference,
+    robust_intersection,
+    robust_union,
+)
 from stomppad.svg_parse import UnsafeXmlError, parse_transform
 
 SVG_NS = 'xmlns="http://www.w3.org/2000/svg"'
@@ -62,6 +68,36 @@ def test_robust_operations_on_ordinary_shapes():
     assert robust_difference(box(0, 0, 2, 2), box(1, 0, 3, 2)).area == pytest.approx(2)
     assert robust_intersection(box(0, 0, 2, 2), box(1, 0, 3, 2)).area == pytest.approx(2)
     assert robust_difference(box(0, 0, 2, 2), Polygon()).area == pytest.approx(4)
+
+
+@pytest.mark.parametrize('shape', [
+    box(0, 0, 20, 10),
+    Point(0, 0).buffer(30).difference(Point(0, 0).buffer(12)),
+    box(0, 0, 10, 10).union(box(30, 0, 40, 10)),
+    box(0, 0, 30, 8).union(box(0, 0, 8, 30)),
+])
+@pytest.mark.parametrize('distance', [2.0, -2.0, -6.0])
+@pytest.mark.parametrize('join_style', ['round', 'mitre'])
+def test_robust_buffer_agrees_with_geos(shape, distance, join_style):
+    ours = robust_buffer(shape, distance, join_style=join_style)
+    theirs = shape.buffer(distance, join_style=join_style, quad_segs=32)
+    assert ours.is_valid
+    assert ours.symmetric_difference(theirs).area <= 0.004 * theirs.area + 0.05
+
+
+def test_robust_buffer_keeps_holes_and_islands():
+    ring_with_island = Point(0, 0).buffer(30).difference(Point(0, 0).buffer(20)).union(Point(0, 0).buffer(8))
+    grown = robust_buffer(ring_with_island, 2)
+    assert len(polygon_parts(grown)) == 2
+    assert sum(len(polygon.interiors) for polygon in polygon_parts(grown)) == 1
+    assert not grown.contains(Point(14, 0))
+    assert robust_buffer(ring_with_island, -6).is_empty is False
+    assert robust_buffer(ring_with_island, -9).is_empty
+
+
+def test_robust_buffer_of_nothing_is_empty():
+    assert robust_buffer(Polygon(), 2).is_empty
+    assert robust_buffer(box(0, 0, 1, 1), -1).is_empty
 
 
 def test_union_of_nothing_is_empty():
@@ -406,6 +442,14 @@ def test_sharp_stroke_corner_is_bevelled_past_the_miter_limit(svg):
 def test_square_stroke_corner_stays_mitred(svg):
     art = '<polyline points="10,10 50,10 50,50" fill="none" stroke="black" stroke-width="10"/>'
     assert parse_svg(svg(art)).silhouette().bounds == pytest.approx((10, 5, 55, 50))
+
+
+@pytest.mark.parametrize('linecap, area', [('round', math.pi * 4), ('square', 16), ('butt', 0)])
+def test_zero_length_stroke_is_a_dot_shaped_by_its_cap(svg, linecap, area):
+    art = (f'<line x1="50" y1="50" x2="50" y2="50" stroke="black" stroke-width="4" '
+           f'stroke-linecap="{linecap}"/><rect width="1" height="1" fill="red"/>')
+    areas = {region.fill: region.geometry.area for region in parse_svg(svg(art)).regions}
+    assert areas.get('#000000', 0) == pytest.approx(area, rel=0.01)
 
 
 def test_stroke_width_follows_transform(svg):

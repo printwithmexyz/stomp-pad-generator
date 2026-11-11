@@ -198,8 +198,8 @@ async function initPyodide() {
   pyodide = await window.loadPyodide({
     indexURL: `https://cdn.jsdelivr.net/pyodide/${PYODIDE_VERSION}/full/`,
   });
-  log('Loading scientific Python packages (numpy, scipy, scikit-image, shapely)…');
-  await pyodide.loadPackage(['numpy', 'scipy', 'scikit-image', 'shapely', 'micropip']);
+  log('Loading scientific Python packages (numpy, scipy, scikit-image, shapely, pyclipper)…');
+  await pyodide.loadPackage(['numpy', 'scipy', 'scikit-image', 'shapely', 'pyclipper', 'micropip']);
   log('Installing svg.path and defusedxml from PyPI…');
   const micropip = pyodide.pyimport('micropip');
   await micropip.install(['svg.path', 'defusedxml']);

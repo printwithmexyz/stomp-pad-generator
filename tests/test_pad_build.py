@@ -21,6 +21,8 @@ SMILEY = ('<rect width="100" height="100" fill="#fff"/>'
           '<circle cx="50" cy="50" r="45"/>'
           '<circle cx="50" cy="50" r="30" fill="#fff"/>'
           '<circle cx="40" cy="42" r="6"/><circle cx="60" cy="42" r="6"/>')
+GRID_NOISE = 1e-4  # mm; offsets run on an integer grid a ten-millionth of the shape's size
+
 THIN_DIAGONALS = ('<path d="M5 30 L95 5 L97 10.5 L7 36 Z"/>'
                   '<path d="M5 60 L95 85 L93.5 90.5 L3.5 65.5 Z"/>')
 
@@ -145,7 +147,7 @@ def test_settings_from_form_values():
 def test_art_is_scaled_to_the_target_width(svg):
     design = build(svg(SMILEY), target_width=152)
     assert design.width == pytest.approx(152)
-    assert design.art.bounds[:2] == pytest.approx((0, 0), abs=1e-6)
+    assert design.art.bounds[:2] == pytest.approx((0, 0), abs=GRID_NOISE)
 
 
 def test_width_holds_after_cleanup_trims_the_edge(svg):
@@ -158,7 +160,7 @@ def test_width_holds_after_cleanup_trims_the_edge(svg):
 def test_art_sits_at_the_origin_after_cleanup_trims_the_corner(svg):
     art = '<rect x="10" width="90" height="80"/><rect y="99.9" width="0.1" height="0.1"/>'
     design = build(svg(art), target_width=100)
-    assert design.art.bounds == pytest.approx((0, 0, 100, 100 * 80 / 90), abs=1e-6)
+    assert design.art.bounds == pytest.approx((0, 0, 100, 100 * 80 / 90), abs=GRID_NOISE)
 
 
 def test_height_limit_wins_when_tighter(svg):
@@ -197,7 +199,7 @@ def test_hairline_gaps_between_shapes_are_bridged(svg, gap, floors):
            f'<rect x="{50 + gap / 2}" width="{50 - gap / 2}" height="40" fill="blue"/>')
     design = build(svg(art), target_width=100, multicolor=True)
     assert len(polygon_parts(design.art)) == floors
-    assert design.art.bounds == pytest.approx((0, 0, 100, 40), abs=1e-6)
+    assert design.art.bounds == pytest.approx((0, 0, 100, 40), abs=GRID_NOISE)
 
 
 # --- packing ----------------------------------------------------------------
@@ -291,7 +293,7 @@ def test_separate_shapes_share_one_grid(svg):
     row_height = 5 * math.sqrt(3) / 2
     rows = design.positions()[:, 1] / row_height
     assert all(len(packed.positions) > 10 for packed in design.packed.values())
-    assert rows == pytest.approx(np.round(rows), abs=1e-6)
+    assert rows == pytest.approx(np.round(rows), abs=GRID_NOISE)
 
 
 def test_skeleton_is_repeatable():

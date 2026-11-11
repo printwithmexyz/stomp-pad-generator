@@ -508,7 +508,9 @@ def _paint_shape(element, tag, matrix, style, alpha, ctx):
                     * math.sqrt(abs(np.linalg.det(matrix[:2, :2]))))
     if stroke_width > 0 and _is_painted(
             stroke, alpha * stroke_alpha * _fraction(style['stroke-opacity']), ctx):
-        ctx.paint.append(_Paint(_stroke_geometry(subpaths, stroke_width, style), stroke, ctx.shapes_seen))
+        stroked = _stroke_geometry(subpaths, stroke_width, style)
+        if not stroked.is_empty:
+            ctx.paint.append(_Paint(stroked, stroke, ctx.shapes_seen))
 
 
 def _collect_paint(element, matrix, inherited, alpha, ctx):
@@ -546,9 +548,10 @@ def _parse_viewbox(root):
 
 
 def _is_canvas_rectangle(geometry, frame):
+    min_x, min_y, max_x, max_y = geometry.bounds
+    is_rectangle = geometry.area >= BACKGROUND_RECTANGULARITY * (max_x - min_x) * (max_y - min_y)
     covers_canvas = robust_intersection(geometry, frame).area >= BACKGROUND_COVERAGE * frame.area
-    is_rectangle = geometry.area >= BACKGROUND_RECTANGULARITY * box(*geometry.bounds).area
-    return covers_canvas and is_rectangle
+    return bool(is_rectangle and covers_canvas)
 
 
 def _split_background(paint, viewbox):

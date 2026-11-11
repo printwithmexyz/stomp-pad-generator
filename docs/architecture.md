@@ -27,7 +27,7 @@ manifest, so the browser and desktop never drift.
 | `packing.py` | medial-axis centerline and hex-packed pyramid placement |
 | `pad.py` | `PadSettings`, `PadDesign`, `build_pad`: the pipeline end to end |
 | `openscad.py` | a design as `.scad` text with inline polygons (no SVG import) |
-| `overlay.py` | the only place GEOS set operations and buffers are called |
+| `overlay.py` | every union, difference, intersection and offset, done so none can raise |
 | `batch.py` | desktop only: files on disk, cache, STL render, debug picture |
 
 Python owns all geometry. OpenSCAD only extrudes and subtracts the polygons
@@ -36,11 +36,19 @@ it is handed, which is why coordinates can never disagree between the two.
 ### GEOS errors and Pyodide
 
 In Pyodide a C++ exception from GEOS is not converted to a Python exception:
-it ends the runtime. `overlay.py` therefore runs union, difference and
-intersection on a fixed-precision grid, which cannot raise. Buffers still
-can; see "Known gaps" in [v2-plan.md](v2-plan.md). New geometry code must go
-through `overlay.py` instead of calling `.union()`, `.difference()`,
-`.intersection()` or `.buffer()` on a shape.
+it ends the runtime and the page has to be reloaded. That includes the
+exceptions GEOS normally throws and catches itself, such as a buffer retrying
+at lower precision. So `overlay.py` never gives GEOS the chance:
+
+- union, difference and intersection run on a fixed-precision grid, the GEOS
+  mode that is robust by construction;
+- offsets (grow, shrink, stroke outlines) are done by Clipper (`pyclipper`),
+  the integer library slicers use, not by GEOS `buffer`.
+
+New geometry code must go through `overlay.py` instead of calling `.union()`,
+`.difference()`, `.intersection()` or `.buffer()` on a shape. The same goes
+for building geometry from numbers that could be NaN, such as the bounds of
+an empty shape: GEOS rejects those with an exception too.
 
 ## Logger callback pattern
 
